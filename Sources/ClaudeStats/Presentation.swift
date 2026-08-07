@@ -11,7 +11,13 @@ enum Presentation {
 
     // MARK: Menu bar
 
-    static func statusTitle(gauges: [Gauge], hasError: Bool, isPaused: Bool = false) -> NSAttributedString {
+    static func statusTitle(
+        gauges: [Gauge],
+        hasError: Bool,
+        isPaused: Bool = false,
+        staleness: Staleness = .fresh,
+        lastUpdated: Date? = nil
+    ) -> NSAttributedString {
         guard !gauges.isEmpty else {
             return NSAttributedString(
                 string: hasError ? "CC ⚠︎" : "CC …",
@@ -32,7 +38,14 @@ enum Presentation {
                 attributes: [.font: markerFont, .foregroundColor: NSColor.tertiaryLabelColor]
             ))
         }
-        func tint(_ live: NSColor) -> NSColor { isPaused ? .tertiaryLabelColor : live }
+        // Paused means "deliberately not updating"; stale means "couldn't update".
+        // Both stop short of hiding the numbers, but they read differently: paused is
+        // flat grey, stale keeps the grade and simply recedes.
+        let fade = isPaused ? 1 : staleness.opacity
+        func tint(_ live: NSColor) -> NSColor {
+            let base = isPaused ? NSColor.tertiaryLabelColor : live
+            return fade < 1 ? base.withAlphaComponent(fade) : base
+        }
 
         for (index, gauge) in gauges.enumerated() {
             if index > 0 {
@@ -57,22 +70,33 @@ enum Presentation {
             if gauge.isExhausted, let eta = gauge.eta() {
                 title.append(NSAttributedString(
                     string: "\u{2009}\(eta)",
-                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color)]
+                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color(alpha: fade))]
                 ))
             } else {
                 title.append(NSAttributedString(
                     string: "\u{2009}\(gauge.percent)",
-                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color)]
+                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color(alpha: fade))]
                 ))
                 title.append(NSAttributedString(
                     string: "%",
                     attributes: [
                         .font: unitFont,
-                        .foregroundColor: tint(Grade.color(percent: gauge.percent, severity: gauge.severity, alpha: 0.6)),
+                        .foregroundColor: tint(Grade.color(percent: gauge.percent, severity: gauge.severity, alpha: 0.6 * fade)),
                         .baselineOffset: 0.5,
                     ]
                 ))
             }
+        }
+
+        if staleness.warrantsAgeLabel, let lastUpdated, !isPaused {
+            title.append(NSAttributedString(
+                string: " \u{2009}\(Staleness.compactAge(since: lastUpdated))",
+                attributes: [
+                    .font: markerFont,
+                    .foregroundColor: NSColor.tertiaryLabelColor,
+                    .baselineOffset: 0.5,
+                ]
+            ))
         }
 
         // A stale reading is worth flagging, but not worth hiding the numbers for.

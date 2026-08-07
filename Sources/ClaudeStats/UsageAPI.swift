@@ -7,7 +7,7 @@ struct UsageResponse: Decodable {
     let extraUsage: ExtraUsage?
 }
 
-struct Limit: Decodable {
+struct Limit: Codable {
     let kind: String        // "session" | "weekly_all" | "weekly_scoped" | …
     let group: String?      // "session" | "weekly"
     let percent: Double
@@ -16,8 +16,8 @@ struct Limit: Decodable {
     let scope: Scope?
     let isActive: Bool?
 
-    struct Scope: Decodable {
-        struct Model: Decodable {
+    struct Scope: Codable {
+        struct Model: Codable {
             let id: String?
             let displayName: String?
         }
@@ -41,12 +41,15 @@ enum UsageAPI {
 
     enum APIError: LocalizedError {
         case unauthorized
+        case rateLimited(retryAfter: TimeInterval?)
         case http(Int, String)
 
         var errorDescription: String? {
             switch self {
             case .unauthorized:
                 return "Claude Code's login has expired and couldn't be renewed automatically."
+            case .rateLimited:
+                return "Rate limited by the usage API — backing off."
             case .http(let code, let body):
                 let trimmed = body.prefix(120).trimmingCharacters(in: .whitespacesAndNewlines)
                 return "Usage API returned \(code)\(trimmed.isEmpty ? "" : ": \(trimmed)")"
@@ -65,7 +68,13 @@ enum UsageAPI {
     private static let renewWindow: TimeInterval = 10 * 60
 
     static func fetch() async throws -> Result {
-        var credentials = try Keychain.accessToken()
+        var credentials: (token: String, expiresAt: Date?)
+        do {
+            credentials = try Keychain.accessToken()
+        } catch {
+            Log.write("keychain read failed: \(error.localizedDescription)")
+            throw error
+        }
         var renewed = false
 
         // Pre-empt the expiry when we can see it coming: cheaper than a failed
@@ -76,10 +85,14 @@ enum UsageAPI {
         }
 
         do {
-            return Result(usage: try await request(token: credentials.token), renewedLogin: renewed)
+            let usage = try await request(token: credentials.token)
+            if renewed { Log.write("renewed login, \(usage.limits.count) limits") }
+            return Result(usage: usage, renewedLogin: renewed)
         } catch APIError.unauthorized {
             // Either the expiry was wrong or the token was revoked — one retry.
+            Log.write("401 — asking the CLI to renew")
             guard await renewLogin(), let fresh = try? Keychain.accessToken() else {
+                Log.write("renewal did not produce a new token")
                 throw APIError.unauthorized
             }
             return Result(usage: try await request(token: fresh.token), renewedLogin: true)
@@ -109,7 +122,15 @@ enum UsageAPI {
 
         guard code == 200 else {
             if code == 401 || code == 403 { throw APIError.unauthorized }
-            throw APIError.http(code, String(data: data, encoding: .utf8) ?? "")
+            if code == 429 {
+                let header = (response as? HTTPURLResponse)?
+                    .value(forHTTPHeaderField: "retry-after")
+                Log.write("HTTP 429, retry-after: \(header ?? "absent")")
+                throw APIError.rateLimited(retryAfter: header.flatMap(TimeInterval.init))
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            Log.write("HTTP \(code): \(body.prefix(200).replacingOccurrences(of: "\n", with: " "))")
+            throw APIError.http(code, body)
         }
 
         let decoder = JSONDecoder()
@@ -124,7 +145,12 @@ enum UsageAPI {
             }
             return date
         }
-        return try decoder.decode(UsageResponse.self, from: data)
+        do {
+            return try decoder.decode(UsageResponse.self, from: data)
+        } catch {
+            Log.write("decode failed: \(error)")
+            throw error
+        }
     }
 }
 

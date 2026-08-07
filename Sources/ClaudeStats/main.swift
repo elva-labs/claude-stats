@@ -1,7 +1,10 @@
 import AppKit
 import ServiceManagement
 
-let refreshInterval: TimeInterval = 60
+/// Quota percentages move slowly, and the endpoint throttles more readily than the
+/// numbers change, so the background poll is deliberately unhurried. Opening the menu
+/// fetches on demand anyway, which is when freshness actually matters.
+let refreshInterval: TimeInterval = 120
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -14,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastError: String?
     private var lastUpdated: Date?
     private var renewedLogin = false
+    private var needsInteractiveLogin = false
+    private var throttledUntil: Date?
+    private var backoffStep = 0
     private var isFetching = false
     private var menuIsOpen = false
 
@@ -39,7 +45,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         displayTimer?.tolerance = 5
 
-        refresh()
+        // Show the last known reading immediately. The first fetch may be seconds
+        // away, or — if the network is down or the endpoint is throttling — never.
+        if let snapshot = Store.load() {
+            gauges = Self.sorted(snapshot.limits)
+            lastUpdated = snapshot.savedAt
+            render()
+        }
+
+        refresh(force: true)
     }
 
     /// Repaint from what we already know, and go ask the server the moment a quota's
@@ -65,27 +79,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Data
 
-    private func refresh() {
+    private func refresh(force: Bool = false) {
         guard !isFetching, !isPaused else { return }
+        // The usage endpoint rate-limits, so a backoff is binding even on a manual
+        // refresh — hammering it while throttled only extends the throttle.
+        if let until = throttledUntil, until > Date(), !force { return }
+        if let last = lastUpdated, Date().timeIntervalSince(last) < 10, !force { return }
+
         isFetching = true
 
         Task {
             defer { isFetching = false }
             do {
                 let result = try await UsageAPI.fetch()
-                gauges = result.usage.limits
-                    .map(Gauge.init(limit:))
-                    .sorted { ($0.sortKey, $0.longLabel) < ($1.sortKey, $1.longLabel) }
+                // Log transitions only — a line per successful poll would bury the
+                // few events that actually explain a problem.
+                if lastError != nil || throttledUntil != nil || lastUpdated == nil {
+                    Log.write("ok — \(result.usage.limits.count) limits")
+                }
+                gauges = Self.sorted(result.usage.limits)
+                Store.save(limits: result.usage.limits)
                 extraUsage = result.usage.extraUsage
                 renewedLogin = result.renewedLogin
                 lastError = nil
+                needsInteractiveLogin = false
+                throttledUntil = nil
+                backoffStep = 0
                 lastUpdated = Date()
+            } catch UsageAPI.APIError.rateLimited(let retryAfter) {
+                applyBackoff(retryAfter: retryAfter)
             } catch {
                 lastError = error.localizedDescription
+                // Only an auth failure is something a human can fix by signing in;
+                // offering it for a network blip or a rate limit just misleads.
+                needsInteractiveLogin = error is UsageAPI.APIError
+                    && (error as? UsageAPI.APIError).map { if case .unauthorized = $0 { true } else { false } } == true
             }
             repaint()
         }
     }
+
+    /// Exponential backoff, honouring `Retry-After` when the server sends one.
+    /// Being throttled is a normal state to sit in, not an error to shout about, so
+    /// the last known figures stay on screen while it waits.
+    private func applyBackoff(retryAfter: TimeInterval?) {
+        backoffStep = min(backoffStep + 1, 5)
+        // The server has been seen sending `retry-after: 0`, which would mean no
+        // backoff at all — treat its hint as a floor to respect, never a licence to
+        // retry immediately.
+        let exponential = min(refreshInterval * pow(2, Double(backoffStep)), 1800)
+        let delay = max(retryAfter ?? 0, exponential)
+        throttledUntil = Date().addingTimeInterval(delay)
+        lastError = nil
+        Log.write("throttled for \(Int(delay))s (step \(backoffStep))")
+    }
+
+    private static func sorted(_ limits: [Limit]) -> [Gauge] {
+        limits.map(Gauge.init(limit:))
+            .sorted { ($0.sortKey, $0.longLabel) < ($1.sortKey, $1.longLabel) }
+    }
+
+    private var staleness: Staleness { Staleness(lastUpdated: lastUpdated) }
 
     private func repaint() {
         render()
@@ -120,7 +174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.attributedTitle = Presentation.statusTitle(
             gauges: gauges,
             hasError: lastError != nil,
-            isPaused: isPaused
+            isPaused: isPaused,
+            staleness: staleness,
+            lastUpdated: lastUpdated
         )
     }
 
@@ -141,11 +197,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let lastError {
             menu.addItem(disabled(lastError, color: .systemRed))
-            if ClaudeCLI.executable != nil {
+            if needsInteractiveLogin, ClaudeCLI.executable != nil {
                 let signIn = NSMenuItem(title: "Sign In to Claude Code…", action: #selector(signIn), keyEquivalent: "")
                 signIn.target = self
                 menu.addItem(signIn)
             }
+            menu.addItem(.separator())
+        }
+
+        if let until = throttledUntil, until > Date() {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            menu.addItem(disabled(
+                "Rate limited by the usage API · retrying \(f.string(from: until))",
+                color: .secondaryLabelColor
+            ))
             menu.addItem(.separator())
         }
 
@@ -189,8 +255,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let f = DateFormatter()
             f.dateFormat = "HH:mm:ss"
             let note = renewedLogin ? " · renewed login" : ""
+            let age = staleness.warrantsAgeLabel
+                ? " (\(Staleness.compactAge(since: lastUpdated)) ago)"
+                : ""
             menu.addItem(disabled(
-                "Updated \(f.string(from: lastUpdated))\(note) · click a row to copy",
+                "Updated \(f.string(from: lastUpdated))\(age)\(note) · click a row to copy",
                 color: .tertiaryLabelColor,
                 size: 11
             ))
@@ -232,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Actions
 
-    @objc private func refreshNow() { refresh() }
+    @objc private func refreshNow() { refresh(force: throttledUntil == nil) }
 
     @objc private func signIn() { ClaudeCLI.openInteractiveLogin() }
 

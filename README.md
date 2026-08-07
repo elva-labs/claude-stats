@@ -108,6 +108,50 @@ If the refresh token itself has expired, no automation can help — the menu the
 The CLI is located by absolute path (`~/.local/bin/claude`, Homebrew, `/usr/local/bin`),
 because an app launched by Finder or launchd inherits a bare `PATH`.
 
+## Surviving an outage
+
+The last successful reading is written to
+`~/Library/Application Support/ClaudeStats/state.json` and restored at launch, before
+the first network call. Without it the app opens blank after every launch and shows
+nothing at all when the network is down or the endpoint is throttling — which is
+exactly when you are most likely to be looking at it.
+
+Rather than a boolean "offline" flag, the readout **fades with age**, because age is
+the more useful signal: a reading four minutes old during a brief blip is still worth
+reading at full strength, while one from this morning is not.
+
+| Age | Appearance |
+|-----|------------|
+| under 5 min | full strength |
+| under 30 min | slightly dimmed |
+| under 6 hours | dimmed, age shown (`3h`) |
+| older | heavily dimmed, age shown (`2d`) |
+
+Stale data keeps its colour grade and simply recedes — deliberately different from
+**paused**, which goes flat grey. The two states mean different things: "couldn't
+update" versus "told not to update".
+
+## Rate limiting
+
+The usage endpoint throttles, and it will do so long before you notice any problem
+with your Claude usage itself — restarting the app repeatedly during development is
+enough to trip it. A 429 is therefore treated as a normal state to sit in rather than
+an error to shout about: the last known figures stay on screen, and the dropdown
+explains when the next attempt is due.
+
+Backoff doubles from the poll interval up to a 30-minute ceiling and resets on the
+first success. The server has been observed sending `retry-after: 0`, which taken
+literally would mean no backoff at all, so its hint is treated as a **floor** to
+respect rather than a licence to retry immediately. The backoff binds manual refreshes
+too — hammering a throttled endpoint only extends the throttle.
+
+## Diagnostics
+
+A menu bar app has nowhere to show a stack trace, so anything worth diagnosing is
+appended to `~/Library/Logs/ClaudeStats.log`. It records state *transitions* — the
+first success after a failure, HTTP errors, throttles, renewals — rather than a line
+per poll, so the events that explain a problem aren't buried. It truncates at 256 KB.
+
 ## Pausing
 
 **Pause for 12 Hours** (⌘P) stops polling; the menu bar keeps showing the last known
@@ -145,6 +189,8 @@ Requires macOS 14+ and the Swift toolchain that ships with Xcode.
 | `Sources/ClaudeStats/Presentation.swift` | Menu bar title and dropdown row typography |
 | `Sources/ClaudeStats/Keychain.swift` | Read-only access-token lookup |
 | `Sources/ClaudeStats/ClaudeCLI.swift` | Nudges the CLI to renew its own login |
+| `Sources/ClaudeStats/Store.swift` | Last-reading persistence and the staleness ladder |
+| `Sources/ClaudeStats/Log.swift` | Append-only diagnostics log |
 
 `Presentation` is deliberately free of app state, so the exact strings the app draws
 can be rendered to a PNG from a throwaway `main.swift` compiled against these sources

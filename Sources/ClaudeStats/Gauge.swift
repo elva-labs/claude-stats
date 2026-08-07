@@ -16,7 +16,11 @@ struct Gauge {
     }
 
     /// Where this quota sits on the green → red scale.
-    var color: NSColor { Grade.color(percent: percent, severity: severity) }
+    var color: NSColor { color(alpha: 1) }
+
+    func color(alpha: CGFloat) -> NSColor {
+        Grade.color(percent: percent, severity: severity, alpha: alpha)
+    }
 
     init(limit: Limit) {
         let modelName = limit.scope?.model?.displayName

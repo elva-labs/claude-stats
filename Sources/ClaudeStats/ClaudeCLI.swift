@@ -42,6 +42,20 @@ enum ClaudeCLI {
         // Keep it non-interactive: no TTY, so it can never sit waiting for input.
         process.standardInput = FileHandle.nullDevice
 
+        // Launched at login we inherit almost no environment, so hand the CLI the
+        // variables it needs. `USER` matters more than it looks: without it the CLI
+        // reports `loggedIn: false` and silently renews nothing, so the app would
+        // appear to be self-healing while doing exactly nothing.
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = NSHomeDirectory()
+        environment["USER"] = NSUserName()
+        environment["LOGNAME"] = NSUserName()
+        environment["PATH"] = [
+            executable.deletingLastPathComponent().path,
+            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        ].joined(separator: ":")
+        process.environment = environment
+
         return await withCheckedContinuation { continuation in
             let resumed = Resumed()
 
