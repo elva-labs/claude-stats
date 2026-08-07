@@ -82,6 +82,39 @@ poll. Claude Code owns the refresh cycle and writes the fresh token back to the 
 keychain item, so this app stays current without ever touching the refresh token or
 writing to your credentials.
 
+That ownership is deliberate, not laziness. The token endpoint returns a new
+`refresh_token` alongside each access token — refresh tokens **rotate** — so a second
+client performing its own refresh would invalidate the one Claude Code holds and break
+your actual login. There is no safe way to have two independent owners of one
+credential.
+
+### Keeping it alive without running Claude Code
+
+Access tokens last roughly eight hours and are only renewed while Claude Code is
+running, so an app left up overnight would otherwise wake to a dead token. Instead of
+refreshing the token itself, the app asks the CLI to do it:
+
+- When the stored expiry is **within 10 minutes**, or a request comes back **401**, it
+  runs `claude auth status --json` in the background.
+- That command touches no inference, so it costs **none of the quota this app
+  reports on** — which rules out the obvious alternative of firing a throwaway prompt.
+  It returns in about 0.2s.
+- It then re-reads the keychain and only reports a renewal if the token **actually
+  changed**, rather than trusting the exit code.
+
+If the refresh token itself has expired, no automation can help — the menu then offers
+**Sign In to Claude Code…**, which opens Terminal running `claude auth login`.
+
+The CLI is located by absolute path (`~/.local/bin/claude`, Homebrew, `/usr/local/bin`),
+because an app launched by Finder or launchd inherits a bare `PATH`.
+
+## Pausing
+
+**Pause for 12 Hours** (⌘P) stops polling; the menu bar keeps showing the last known
+figures but greys the whole readout behind a `⏸`, since a live colour grade would imply
+data that is no longer current. The pause survives quits and reboots, expires on its
+own, and **Resume Polling** ends it early.
+
 On first launch macOS asks whether this app may read that keychain item — click
 **Always Allow**. The permission is remembered against the app's code signature, so
 rebuilding the app will ask once more.
@@ -111,6 +144,7 @@ Requires macOS 14+ and the Swift toolchain that ships with Xcode.
 | `Sources/ClaudeStats/Grade.swift` | The colour scale and the mini meters |
 | `Sources/ClaudeStats/Presentation.swift` | Menu bar title and dropdown row typography |
 | `Sources/ClaudeStats/Keychain.swift` | Read-only access-token lookup |
+| `Sources/ClaudeStats/ClaudeCLI.swift` | Nudges the CLI to renew its own login |
 
 `Presentation` is deliberately free of app state, so the exact strings the app draws
 can be rendered to a PNG from a throwaway `main.swift` compiled against these sources

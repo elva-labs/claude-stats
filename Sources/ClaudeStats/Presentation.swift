@@ -11,7 +11,7 @@ enum Presentation {
 
     // MARK: Menu bar
 
-    static func statusTitle(gauges: [Gauge], hasError: Bool) -> NSAttributedString {
+    static func statusTitle(gauges: [Gauge], hasError: Bool, isPaused: Bool = false) -> NSAttributedString {
         guard !gauges.isEmpty else {
             return NSAttributedString(
                 string: hasError ? "CC ⚠︎" : "CC …",
@@ -23,6 +23,17 @@ enum Presentation {
         }
 
         let title = NSMutableAttributedString()
+
+        // While paused the numbers are last-known rather than current, so the whole
+        // readout goes grey — the grade would otherwise imply it was still live.
+        if isPaused {
+            title.append(NSAttributedString(
+                string: "⏸ ",
+                attributes: [.font: markerFont, .foregroundColor: NSColor.tertiaryLabelColor]
+            ))
+        }
+        func tint(_ live: NSColor) -> NSColor { isPaused ? .tertiaryLabelColor : live }
+
         for (index, gauge) in gauges.enumerated() {
             if index > 0 {
                 title.append(NSAttributedString(
@@ -37,7 +48,7 @@ enum Presentation {
                 string: gauge.shortLabel,
                 attributes: [
                     .font: markerFont,
-                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .foregroundColor: tint(.secondaryLabelColor),
                     .baselineOffset: 0.5,
                 ]
             ))
@@ -46,18 +57,18 @@ enum Presentation {
             if gauge.isExhausted, let eta = gauge.eta() {
                 title.append(NSAttributedString(
                     string: "\u{2009}\(eta)",
-                    attributes: [.font: numberFont, .foregroundColor: gauge.color]
+                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color)]
                 ))
             } else {
                 title.append(NSAttributedString(
                     string: "\u{2009}\(gauge.percent)",
-                    attributes: [.font: numberFont, .foregroundColor: gauge.color]
+                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color)]
                 ))
                 title.append(NSAttributedString(
                     string: "%",
                     attributes: [
                         .font: unitFont,
-                        .foregroundColor: Grade.color(percent: gauge.percent, severity: gauge.severity, alpha: 0.6),
+                        .foregroundColor: tint(Grade.color(percent: gauge.percent, severity: gauge.severity, alpha: 0.6)),
                         .baselineOffset: 0.5,
                     ]
                 ))

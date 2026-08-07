@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var extraUsage: ExtraUsage?
     private var lastError: String?
     private var lastUpdated: Date?
+    private var renewedLogin = false
     private var isFetching = false
     private var menuIsOpen = false
 
@@ -44,9 +45,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Repaint from what we already know, and go ask the server the moment a quota's
     /// reset time passes rather than waiting out the rest of the poll interval.
     private func tick() {
+        // A pause that has run its course resumes itself.
+        if let until = pausedUntil, until <= Date() {
+            pausedUntil = nil
+            repaint()
+            refresh()
+            return
+        }
+
         guard !gauges.isEmpty else { return }
-        render()
-        if menuIsOpen, let menu = statusItem.menu { rebuild(menu) }
+        repaint()
+        guard !isPaused else { return }
 
         let now = Date()
         if gauges.contains(where: { $0.resetsAt.map { $0 <= now } ?? false }) {
@@ -57,25 +66,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Data
 
     private func refresh() {
-        guard !isFetching else { return }
+        guard !isFetching, !isPaused else { return }
         isFetching = true
 
         Task {
             defer { isFetching = false }
             do {
-                let usage = try await UsageAPI.fetch()
-                gauges = usage.limits
+                let result = try await UsageAPI.fetch()
+                gauges = result.usage.limits
                     .map(Gauge.init(limit:))
                     .sorted { ($0.sortKey, $0.longLabel) < ($1.sortKey, $1.longLabel) }
-                extraUsage = usage.extraUsage
+                extraUsage = result.usage.extraUsage
+                renewedLogin = result.renewedLogin
                 lastError = nil
                 lastUpdated = Date()
             } catch {
                 lastError = error.localizedDescription
             }
-            render()
-            if menuIsOpen, let menu = statusItem.menu { rebuild(menu) }
+            repaint()
         }
+    }
+
+    private func repaint() {
+        render()
+        if menuIsOpen, let menu = statusItem.menu { rebuild(menu) }
+    }
+
+    // MARK: Pause
+
+    private static let pauseKey = "pausedUntil"
+    private static let pauseDuration: TimeInterval = 12 * 3600
+
+    private var pausedUntil: Date? {
+        get { UserDefaults.standard.object(forKey: Self.pauseKey) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: Self.pauseKey) }
+    }
+
+    private var isPaused: Bool { (pausedUntil ?? .distantPast) > Date() }
+
+    @objc private func togglePause() {
+        if isPaused {
+            pausedUntil = nil
+            refresh()
+        } else {
+            pausedUntil = Date().addingTimeInterval(Self.pauseDuration)
+        }
+        repaint()
     }
 
     // MARK: Menu bar title
@@ -83,7 +119,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func render() {
         statusItem.button?.attributedTitle = Presentation.statusTitle(
             gauges: gauges,
-            hasError: lastError != nil
+            hasError: lastError != nil,
+            isPaused: isPaused
         )
     }
 
@@ -104,6 +141,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let lastError {
             menu.addItem(disabled(lastError, color: .systemRed))
+            if ClaudeCLI.executable != nil {
+                let signIn = NSMenuItem(title: "Sign In to Claude Code…", action: #selector(signIn), keyEquivalent: "")
+                signIn.target = self
+                menu.addItem(signIn)
+            }
+            menu.addItem(.separator())
+        }
+
+        if isPaused, let until = pausedUntil {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm"
+            menu.addItem(disabled(
+                "Paused · resumes \(f.string(from: until))",
+                color: .secondaryLabelColor
+            ))
             menu.addItem(.separator())
         }
 
@@ -136,8 +188,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let lastUpdated {
             let f = DateFormatter()
             f.dateFormat = "HH:mm:ss"
+            let note = renewedLogin ? " · renewed login" : ""
             menu.addItem(disabled(
-                "Updated \(f.string(from: lastUpdated)) · click a row to copy",
+                "Updated \(f.string(from: lastUpdated))\(note) · click a row to copy",
                 color: .tertiaryLabelColor,
                 size: 11
             ))
@@ -145,7 +198,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let refreshItem = NSMenuItem(title: "Refresh Now", action: #selector(refreshNow), keyEquivalent: "r")
         refreshItem.target = self
+        refreshItem.isEnabled = !isPaused
         menu.addItem(refreshItem)
+
+        let pauseItem = NSMenuItem(
+            title: isPaused ? "Resume Polling" : "Pause for 12 Hours",
+            action: #selector(togglePause),
+            keyEquivalent: "p"
+        )
+        pauseItem.target = self
+        menu.addItem(pauseItem)
 
         let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         loginItem.target = self
@@ -171,6 +233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Actions
 
     @objc private func refreshNow() { refresh() }
+
+    @objc private func signIn() { ClaudeCLI.openInteractiveLogin() }
 
     @objc private func copyRow(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
