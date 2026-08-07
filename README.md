@@ -70,10 +70,13 @@ The response's `limits[]` array is the source of truth:
 {"kind": "weekly_scoped",  "group": "weekly",  "percent": 12, "scope": {"model": {"display_name": "Fable"}}}
 ```
 
-The app polls it every 60 seconds (with a 10-second timer tolerance so macOS can
+The app polls it every 120 seconds (with a 10-second timer tolerance so macOS can
 coalesce the wakeup), and again whenever you open the menu — so the numbers are always
-fresh the moment you look at them, wherever the poll cycle happens to be. Nothing
-polls while the machine is asleep; the first poll after wake catches up.
+fresh the moment you look at them, wherever the poll cycle happens to be. The interval
+is deliberately unhurried: quota percentages move slowly, the endpoint throttles more
+readily than the numbers change, and on-demand fetching covers the moment freshness
+actually matters. Nothing polls while the machine is asleep; the first poll after wake
+catches up.
 
 ## Token handling
 
