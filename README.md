@@ -130,10 +130,10 @@ update" versus "told not to update".
 
 ## Polling cadence
 
-The usage endpoint throttles readily — a single request 57 seconds after a success has
-been observed returning 429. Since this app exists to give you a sense of your quota
-across a workday rather than a live feed, the cadence is tuned well below anything
-that would provoke it.
+The usage endpoint throttles readily — 429s have been observed both 57 seconds and
+2 minutes after a success. The cadence is tuned well below that, which costs little
+because **opening the menu fetches on demand**: the background poll is not what you
+see when you go looking, it only keeps the passive glance roughly right.
 
 **The interval adapts to whether the numbers are actually moving.** Every three
 consecutive identical readings doubles the gap; any change at all snaps it straight
@@ -141,13 +141,11 @@ back to the busy cadence:
 
 | Identical readings | Interval |
 |--------------------|----------|
-| 0–2 | 2 min |
-| 3–5 | 4 min |
-| 6–8 | 8 min |
-| 9+ | 10 min (ceiling) |
+| 0–2 | 5 min |
+| 3+ | 10 min (ceiling) |
 
-Roughly 42 minutes of nothing changing reaches the ceiling. In requests per hour that
-is **30 while you're working, 6 while idle, and none at all while the display is
+Roughly 15 minutes of nothing changing reaches the ceiling. In requests per hour that
+is **12 while you're working, 6 while idle, and none at all while the display is
 asleep or the screen is locked** — polling then would spend requests on a readout
 nobody can see, and overnight that would be most of them. Coming back to the machine
 triggers an immediate fetch, since that is exactly when a current reading matters.

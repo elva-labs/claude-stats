@@ -1,11 +1,14 @@
 import AppKit
 import ServiceManagement
 
-/// Cadence while the numbers are actually moving. The endpoint throttles far more
-/// readily than the numbers change — a single request 57 seconds after a success has
-/// been seen return 429 — and this is for getting a grasp across a workday, not a
-/// live feed, so even the busy cadence is unhurried.
-let baseInterval: TimeInterval = 120
+/// Cadence while the numbers are actually moving.
+///
+/// Deliberately slow, for two reasons. The endpoint throttles readily — 429s have
+/// been observed both 57 seconds and 2 minutes after a success — and, more to the
+/// point, opening the menu fetches on demand anyway. The background poll therefore
+/// isn't what you see when you go looking; it only keeps the passive glance roughly
+/// right, and roughly right within five minutes is plenty for that.
+let baseInterval: TimeInterval = 300
 
 /// Ceiling once nothing has changed for a while. Long idle stretches are the common
 /// case, and polling through them is pure waste.
