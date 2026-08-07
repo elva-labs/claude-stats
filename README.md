@@ -70,13 +70,7 @@ The response's `limits[]` array is the source of truth:
 {"kind": "weekly_scoped",  "group": "weekly",  "percent": 12, "scope": {"model": {"display_name": "Fable"}}}
 ```
 
-The app polls it every 120 seconds (with a 10-second timer tolerance so macOS can
-coalesce the wakeup), and again whenever you open the menu — so the numbers are always
-fresh the moment you look at them, wherever the poll cycle happens to be. The interval
-is deliberately unhurried: quota percentages move slowly, the endpoint throttles more
-readily than the numbers change, and on-demand fetching covers the moment freshness
-actually matters. Nothing polls while the machine is asleep; the first poll after wake
-catches up.
+How often it polls is covered in [Polling cadence](#polling-cadence) below.
 
 ## Token handling
 
@@ -134,19 +128,46 @@ Stale data keeps its colour grade and simply recedes — deliberately different 
 **paused**, which goes flat grey. The two states mean different things: "couldn't
 update" versus "told not to update".
 
-## Rate limiting
+## Polling cadence
 
-The usage endpoint throttles, and it will do so long before you notice any problem
-with your Claude usage itself — restarting the app repeatedly during development is
-enough to trip it. A 429 is therefore treated as a normal state to sit in rather than
-an error to shout about: the last known figures stay on screen, and the dropdown
-explains when the next attempt is due.
+The usage endpoint throttles readily — a single request 57 seconds after a success has
+been observed returning 429. Since this app exists to give you a sense of your quota
+across a workday rather than a live feed, the cadence is tuned well below anything
+that would provoke it.
 
-Backoff doubles from the poll interval up to a 30-minute ceiling and resets on the
-first success. The server has been observed sending `retry-after: 0`, which taken
-literally would mean no backoff at all, so its hint is treated as a **floor** to
-respect rather than a licence to retry immediately. The backoff binds manual refreshes
-too — hammering a throttled endpoint only extends the throttle.
+**The interval adapts to whether the numbers are actually moving.** Every three
+consecutive identical readings doubles the gap; any change at all snaps it straight
+back to the busy cadence:
+
+| Identical readings | Interval |
+|--------------------|----------|
+| 0–2 | 2 min |
+| 3–5 | 4 min |
+| 6–8 | 8 min |
+| 9+ | 10 min (ceiling) |
+
+Roughly 42 minutes of nothing changing reaches the ceiling. In requests per hour that
+is **30 while you're working, 6 while idle, and none at all while the display is
+asleep or the screen is locked** — polling then would spend requests on a readout
+nobody can see, and overnight that would be most of them. Coming back to the machine
+triggers an immediate fetch, since that is exactly when a current reading matters.
+
+Three further guards:
+
+- A **60-second floor between any two requests**, whatever triggered them, so the
+  timer, a menu open and a wake-from-sleep can't land together and burst. Manual
+  refreshes get a shorter 15-second floor.
+- Spacing is measured from the last **attempt**, not the last success — a failed
+  request costs the endpoint just as much as one that worked.
+- A **429 is a normal state to sit in**, not an error to shout about: the last known
+  figures stay on screen and the dropdown says when the next attempt is due. Backoff
+  doubles to a 30-minute ceiling and resets on the first success. The server sends
+  `retry-after: 0`, which taken literally would mean no backoff at all, so its hint is
+  treated as a **floor** to respect rather than a licence to retry immediately. It
+  binds manual refreshes too — hammering a throttled endpoint only extends the
+  throttle.
+
+The dropdown shows the current cadence (`every 4m`) so the adaptation isn't invisible.
 
 ## Diagnostics
 

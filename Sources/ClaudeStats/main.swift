@@ -1,16 +1,31 @@
 import AppKit
 import ServiceManagement
 
-/// Quota percentages move slowly, and the endpoint throttles more readily than the
-/// numbers change, so the background poll is deliberately unhurried. Opening the menu
-/// fetches on demand anyway, which is when freshness actually matters.
-let refreshInterval: TimeInterval = 120
+/// Cadence while the numbers are actually moving. The endpoint throttles far more
+/// readily than the numbers change — a single request 57 seconds after a success has
+/// been seen return 429 — and this is for getting a grasp across a workday, not a
+/// live feed, so even the busy cadence is unhurried.
+let baseInterval: TimeInterval = 120
+
+/// Ceiling once nothing has changed for a while. Long idle stretches are the common
+/// case, and polling through them is pure waste.
+let maxInterval: TimeInterval = 600
+
+/// Unchanged readings needed before the interval doubles again.
+let unchangedPollsPerBackoff = 3
+
+/// Floor between any two requests, whatever triggered them. The timer, a menu open
+/// and a wake-from-sleep can otherwise land together and burst.
+let minimumSpacing: TimeInterval = 60
+
+/// A deliberate button press gets a shorter floor, but never bypasses a server
+/// throttle — see `refresh(force:)`.
+let manualSpacing: TimeInterval = 15
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
-    private var displayTimer: Timer?
 
     private var gauges: [Gauge] = []
     private var extraUsage: ExtraUsage?
@@ -22,6 +37,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var backoffStep = 0
     private var isFetching = false
     private var menuIsOpen = false
+    private var lastAttempt: Date?
+    private var unchangedPolls = 0
+    private var lastSignature: String?
+    private var displayAsleep = false
+    private var screenLocked = false
+
+    /// Nobody can see the menu bar right now, so nothing needs fetching for it.
+    private var isIdle: Bool { displayAsleep || screenLocked }
 
     // MARK: Lifecycle
 
@@ -33,17 +56,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { _ in
-            Task { @MainActor in self.refresh() }
-        }
-        timer?.tolerance = 10
-
-        // A countdown that only moves when the network answers looks broken, so the
-        // display re-renders from cached data on its own cadence.
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+        // One timer drives everything. It ticks faster than any poll interval so the
+        // countdowns stay live, and decides on each tick whether a fetch is due —
+        // which is what lets the poll interval vary without rescheduling anything.
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
             Task { @MainActor in self.tick() }
         }
-        displayTimer?.tolerance = 5
+        timer?.tolerance = 5
 
         // Show the last known reading immediately. The first fetch may be seconds
         // away, or — if the network is down or the endpoint is throttling — never.
@@ -53,7 +72,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             render()
         }
 
+        observeIdleState()
         refresh(force: true)
+    }
+
+    // MARK: Idle
+
+    /// Polling while the display is asleep or the screen is locked spends requests
+    /// nobody can see the result of — and overnight that is the majority of them.
+    private func observeIdleState() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        let distributed = DistributedNotificationCenter.default()
+
+        func observe(_ center: NotificationCenter, _ name: NSNotification.Name, _ handler: @escaping () -> Void) {
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated(handler)
+            }
+        }
+        func observe(_ center: DistributedNotificationCenter, _ name: String, _ handler: @escaping () -> Void) {
+            center.addObserver(forName: NSNotification.Name(name), object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated(handler)
+            }
+        }
+
+        observe(workspace, NSWorkspace.screensDidSleepNotification) { self.displayAsleep = true }
+        observe(workspace, NSWorkspace.willSleepNotification) { self.displayAsleep = true }
+        observe(workspace, NSWorkspace.screensDidWakeNotification) { self.wake() }
+        observe(workspace, NSWorkspace.didWakeNotification) { self.wake() }
+        observe(distributed, "com.apple.screenIsLocked") { self.screenLocked = true }
+        observe(distributed, "com.apple.screenIsUnlocked") { self.screenLocked = false; self.wake() }
+    }
+
+    /// Coming back to the machine is exactly when a current reading matters, so fetch
+    /// straight away rather than waiting out the rest of the interval.
+    private func wake() {
+        displayAsleep = false
+        repaint()
+        refresh()
     }
 
     /// Repaint from what we already know, and go ask the server the moment a quota's
@@ -67,14 +122,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        guard !gauges.isEmpty else { return }
-        repaint()
-        guard !isPaused else { return }
+        if !gauges.isEmpty { repaint() }
+        guard !isPaused, !isIdle else { return }
 
         let now = Date()
+
+        // A quota coming back is worth knowing about promptly, whatever the cadence.
         if gauges.contains(where: { $0.resetsAt.map { $0 <= now } ?? false }) {
             refresh()
+            return
         }
+
+        if lastAttempt.map({ now.timeIntervalSince($0) >= currentInterval }) ?? true {
+            refresh()
+        }
+    }
+
+    // MARK: Cadence
+
+    /// Doubles the gap after every few identical readings, capped, and snaps back to
+    /// the busy cadence the moment a number moves. Long stretches of not using Claude
+    /// are the normal case, and polling through them tells you nothing you don't
+    /// already have on screen.
+    private var currentInterval: TimeInterval {
+        let doublings = unchangedPolls / unchangedPollsPerBackoff
+        return min(baseInterval * pow(2, Double(doublings)), maxInterval)
+    }
+
+    /// What counts as "the same reading". Reset times are included so the start of a
+    /// fresh window registers as a change even when the percentage lands identically.
+    private static func signature(of gauges: [Gauge]) -> String {
+        gauges.map { gauge in
+            "\(gauge.shortLabel)\(gauge.percent)@\(gauge.resetsAt?.timeIntervalSince1970 ?? 0)"
+        }.joined(separator: "|")
     }
 
     // MARK: Data
@@ -83,9 +163,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !isFetching, !isPaused else { return }
         // The usage endpoint rate-limits, so a backoff is binding even on a manual
         // refresh — hammering it while throttled only extends the throttle.
-        if let until = throttledUntil, until > Date(), !force { return }
-        if let last = lastUpdated, Date().timeIntervalSince(last) < 10, !force { return }
+        if let until = throttledUntil, until > Date() { return }
 
+        // Spacing is measured from the last *attempt*, not the last success: a failed
+        // request costs the endpoint just as much as one that worked.
+        let spacing = force ? manualSpacing : minimumSpacing
+        if let last = lastAttempt, Date().timeIntervalSince(last) < spacing { return }
+
+        lastAttempt = Date()
         isFetching = true
 
         Task {
@@ -99,6 +184,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 gauges = Self.sorted(result.usage.limits)
                 Store.save(limits: result.usage.limits)
+
+                let signature = Self.signature(of: gauges)
+                if signature == lastSignature {
+                    unchangedPolls += 1
+                } else {
+                    unchangedPolls = 0
+                    lastSignature = signature
+                }
                 extraUsage = result.usage.extraUsage
                 renewedLogin = result.renewedLogin
                 lastError = nil
@@ -127,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The server has been seen sending `retry-after: 0`, which would mean no
         // backoff at all — treat its hint as a floor to respect, never a licence to
         // retry immediately.
-        let exponential = min(refreshInterval * pow(2, Double(backoffStep)), 1800)
+        let exponential = min(baseInterval * pow(2, Double(backoffStep)), 1800)
         let delay = max(retryAfter ?? 0, exponential)
         throttledUntil = Date().addingTimeInterval(delay)
         lastError = nil
@@ -185,7 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
         rebuild(menu)
-        refresh()  // repaints the menu when it lands, even while open
+        refresh()  // lands while the menu is open; spacing keeps it from bursting
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -255,11 +348,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let f = DateFormatter()
             f.dateFormat = "HH:mm:ss"
             let note = renewedLogin ? " · renewed login" : ""
+            let cadence = " · every \(Int(currentInterval / 60))m"
             let age = staleness.warrantsAgeLabel
                 ? " (\(Staleness.compactAge(since: lastUpdated)) ago)"
                 : ""
             menu.addItem(disabled(
-                "Updated \(f.string(from: lastUpdated))\(age)\(note) · click a row to copy",
+                "Updated \(f.string(from: lastUpdated))\(age)\(cadence)\(note) · click a row to copy",
                 color: .tertiaryLabelColor,
                 size: 11
             ))
