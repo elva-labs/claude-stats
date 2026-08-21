@@ -181,9 +181,12 @@ figures but greys the whole readout behind a `⏸`, since a live colour grade wo
 data that is no longer current. The pause survives quits and reboots, expires on its
 own, and **Resume Polling** ends it early.
 
-On first launch macOS asks whether this app may read that keychain item — click
-**Always Allow**. The permission is remembered against the app's code signature, so
-rebuilding the app will ask once more.
+There is no keychain permission dialog. The app reads the token by running
+`/usr/bin/security find-generic-password` — the same binary Claude Code writes the
+item through — so `security` is already on the item's access list and macOS never
+asks. Reading via the Security framework instead would prompt on every rebuild (the
+ad-hoc signature changes the app's code identity) and again whenever Claude Code
+recreates the item on a token refresh.
 
 If the token is ever rejected, the menu bar shows `⚠︎` next to the last known
 percentages and the dropdown explains why.

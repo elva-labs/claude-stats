@@ -36,8 +36,8 @@ cat > "$BUILD_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature keeps the bundle identity stable for this build, which is what
-# the keychain ACL ("Always Allow") is remembered against.
+# Ad-hoc signature so macOS treats the bundle as a signed app. Keychain access
+# doesn't depend on it — the token is read via /usr/bin/security (see Keychain.swift).
 codesign --force --sign - --identifier "$BUNDLE_ID" "$BUILD_DIR" >/dev/null 2>&1
 
 echo "==> Installing to ${INSTALL_DIR}"
