@@ -49,7 +49,8 @@ with a small set of plausible severity words (`exceeded`, `blocked`, `reached`,
 
 Clicking the item opens a dropdown with full names, a mini meter per quota, a trend
 line, reset countdowns, extra-usage credits (when enabled), a manual refresh, and a
-**Start at Login** toggle. Clicking a row copies that quota's summary to the clipboard.
+**Start at Login** toggle. Clicking a row opens its chart; **⌥-clicking** copies that
+quota's summary to the clipboard.
 
 ## The trend line
 
@@ -75,6 +76,36 @@ Three choices make it readable at 46×12 points:
 A reset shows as what it is: the line drops to the floor and starts again. Until
 there is history to draw, the column is simply empty and the row looks as it always
 did.
+
+## The chart
+
+Clicking a row opens the same data at a size you can actually read: gridlines, a time
+axis on wall-clock boundaries, and the gaps and resets marked rather than smoothed
+over. It's a real window, so it survives the menu closing and can sit beside your
+editor. One window, retargeted when you click a different row, because three windows
+is three windows to close.
+
+Two figures sit in the corner that the shape implies but can't state:
+
+- **The rate**, measured over the last hour for a session limit and the last day for a
+  weekly one, because percent-per-hour reads as noise on a quota that runs for a week.
+  A reset inside that lookback suppresses it: the drop to zero would otherwise read as
+  a large negative rate.
+- **When it runs out at that rate**, but only when that lands before the reset.
+  Otherwise the window turns over first and the number means nothing, so the reset
+  countdown is shown instead.
+
+Both are derived from the samples on screen, so they can't disagree with the line
+above them.
+
+A reset breaks the trace rather than joining the old window's last reading to the new
+window's first, which would draw a vertical cliff between two quantities that aren't
+the same series. The dashed marker says what happened there. Steps in the line are the
+API's own resolution: it reports whole percentages, so a weekly chart genuinely moves
+in 1% increments.
+
+The app is an accessory (no Dock icon), so opening the window calls `NSApp.activate()`
+to bring it forward. Nothing else would.
 
 ## Where the numbers come from
 
@@ -244,6 +275,7 @@ Requires macOS 14+ and the Swift toolchain that ships with Xcode.
 | `Sources/ClaudeStats/Gauge.swift` | Limit → display model (labels, resets, severity) |
 | `Sources/ClaudeStats/Grade.swift` | The colour scale and the mini meters |
 | `Sources/ClaudeStats/Sparkline.swift` | The per-row trend line |
+| `Sources/ClaudeStats/Chart.swift` | The full-size chart view and its window |
 | `Sources/ClaudeStats/Presentation.swift` | Menu bar title and dropdown row typography |
 | `Sources/ClaudeStats/Keychain.swift` | Read-only access-token lookup |
 | `Sources/ClaudeStats/ClaudeCLI.swift` | Nudges the CLI to renew its own login |
