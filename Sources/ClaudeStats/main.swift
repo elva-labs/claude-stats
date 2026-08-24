@@ -187,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 gauges = Self.sorted(result.usage.limits)
                 Store.save(limits: result.usage.limits)
+                History.append(limits: result.usage.limits)
 
                 let signature = Self.signature(of: gauges)
                 if signature == lastSignature {
@@ -324,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for gauge in gauges {
             let item = NSMenuItem(title: "", action: #selector(copyRow(_:)), keyEquivalent: "")
             item.target = self
-            item.attributedTitle = Presentation.row(for: gauge)
+            item.attributedTitle = Presentation.row(for: gauge, trend: trend(for: gauge))
             item.representedObject = "\(gauge.longLabel): \(gauge.percent)%"
                 + (gauge.resetDescription().map { ", \($0)" } ?? "")
             menu.addItem(item)
@@ -399,6 +400,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Actions
 
     @objc private func refreshNow() { refresh(force: throttledUntil == nil) }
+
+    private func trend(for gauge: Gauge) -> [History.Sample] {
+        History.series(for: gauge.seriesKey, since: Date().addingTimeInterval(-gauge.trendWindow))
+    }
+
 
     @objc private func signIn() { ClaudeCLI.openInteractiveLogin() }
 

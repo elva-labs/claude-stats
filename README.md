@@ -47,9 +47,34 @@ The API exposes no documented "spent" flag, so this triggers on `percent >= 100`
 with a small set of plausible severity words (`exceeded`, `blocked`, `reached`,
 `depleted`) as a fallback in case a limit is ever reported as blocked below 100%.
 
-Clicking the item opens a dropdown with full names, a mini meter per quota, reset
-countdowns, extra-usage credits (when enabled), a manual refresh, and a **Start at
-Login** toggle. Clicking a row copies that quota's summary to the clipboard.
+Clicking the item opens a dropdown with full names, a mini meter per quota, a trend
+line, reset countdowns, extra-usage credits (when enabled), a manual refresh, and a
+**Start at Login** toggle. Clicking a row copies that quota's summary to the clipboard.
+
+## The trend line
+
+The meter says how much of a quota is gone. The sparkline beside it says how it got
+there — whether 60% accumulated steadily across the window or all of it in the last
+twenty minutes, which is the difference between a comfortable afternoon and running
+out before dinner.
+
+Each row plots its own window: 5 hours for a session limit, 7 days for a weekly one.
+Three choices make it readable at 46×12 points:
+
+- **The scale is fixed at 0–100%, never fitted to the data.** A weekly quota at 6%
+  *should* be a flat sliver along the bottom. Auto-scaling would inflate it into a
+  dramatic climb and make two rows with wildly different headroom look identical.
+- **The x axis is time, not sample number.** Polling slows down when nothing moves
+  and stops entirely while the display sleeps, so spacing samples evenly would
+  stretch a quiet night to the same width as a busy hour.
+- **Gaps in the record break the line** rather than being bridged with a straight
+  segment that was never measured. The threshold is proportional to the window, so an
+  overnight gap breaks a 5-hour trace but barely registers in a weekly one, where it
+  is a normal part of the shape.
+
+A reset shows as what it is: the line drops to the floor and starts again. Until
+there is history to draw, the column is simply empty and the row looks as it always
+did.
 
 ## Where the numbers come from
 
@@ -112,6 +137,13 @@ The last successful reading is written to
 the first network call. Without it the app opens blank after every launch and shows
 nothing at all when the network is down or the endpoint is throttling — which is
 exactly when you are most likely to be looking at it.
+
+Every successful poll is also appended to `history.ndjson` in the same directory —
+one line per poll, the source of the trend lines. `state.json` answers "what do I show
+before the first fetch lands" and is overwritten each time; a trend needs every
+reading kept, which is a different question and so a different file. Lines older than
+16 days are dropped on the next write, which is enough to always have the previous
+weekly window behind the current one. A fortnight of polling costs roughly 200 KB.
 
 Rather than a boolean "offline" flag, the readout **fades with age**, because age is
 the more useful signal: a reading four minutes old during a brief blip is still worth
@@ -211,13 +243,16 @@ Requires macOS 14+ and the Swift toolchain that ships with Xcode.
 | `Sources/ClaudeStats/UsageAPI.swift` | Endpoint client and response decoding |
 | `Sources/ClaudeStats/Gauge.swift` | Limit → display model (labels, resets, severity) |
 | `Sources/ClaudeStats/Grade.swift` | The colour scale and the mini meters |
+| `Sources/ClaudeStats/Sparkline.swift` | The per-row trend line |
 | `Sources/ClaudeStats/Presentation.swift` | Menu bar title and dropdown row typography |
 | `Sources/ClaudeStats/Keychain.swift` | Read-only access-token lookup |
 | `Sources/ClaudeStats/ClaudeCLI.swift` | Nudges the CLI to renew its own login |
 | `Sources/ClaudeStats/Store.swift` | Last-reading persistence and the staleness ladder |
+| `Sources/ClaudeStats/History.swift` | The append-only trail of past readings |
 | `Sources/ClaudeStats/Log.swift` | Append-only diagnostics log |
 
 `Presentation` is deliberately free of app state, so the exact strings the app draws
 can be rendered to a PNG from a throwaway `main.swift` compiled against these sources
 — which is how the colour scale above was checked in both appearances without
-launching anything.
+launching anything. `ChartView` is checked the same way, via
+`bitmapImageRepForCachingDisplay` against fabricated samples.

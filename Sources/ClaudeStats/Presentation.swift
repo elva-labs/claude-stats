@@ -111,9 +111,12 @@ enum Presentation {
 
     // MARK: Dropdown
 
-    /// `S ⇥ Weekly · Fable ⇥ [meter] ⇥ 12% ⇥ resets Tue 08:00`, on tab stops so the
-    /// meters and percentages line up into columns however long the labels run.
-    static func row(for gauge: Gauge) -> NSAttributedString {
+    /// `S ⇥ Weekly · Fable ⇥ [meter] ⇥ 12% ⇥ [trend] ⇥ resets Tue 08:00`, on tab stops
+    /// so the meters and percentages line up into columns however long the labels run.
+    ///
+    /// `trend` is the recorded history for this quota, and is simply left out when
+    /// there is none yet — a fresh install shows the row it always showed.
+    static func row(for gauge: Gauge, trend: [History.Sample] = []) -> NSAttributedString {
         let line = NSMutableAttributedString()
 
         line.append(NSAttributedString(
@@ -143,6 +146,23 @@ enum Presentation {
                 .foregroundColor: gauge.color,
             ]
         ))
+
+        let now = Date()
+        if let spark = Sparkline.image(
+            samples: trend,
+            window: now.addingTimeInterval(-gauge.trendWindow)...now,
+            color: gauge.color
+        ) {
+            let attachment = NSTextAttachment()
+            attachment.image = spark
+            // Sunk below the baseline so the trace sits centred against the text
+            // rather than riding on top of it.
+            attachment.bounds = CGRect(
+                x: 0, y: -3, width: Sparkline.size.width, height: Sparkline.size.height
+            )
+            line.append(NSAttributedString(attachment: attachment))
+        }
+        line.append(NSAttributedString(string: "\t"))
         // The dropdown has room to keep the percentage *and* spell out the wait.
         let trailing = gauge.isExhausted
             ? "at limit · back in \(gauge.eta() ?? "—")"
@@ -160,7 +180,8 @@ enum Presentation {
             NSTextTab(textAlignment: .left, location: 18),    // label
             NSTextTab(textAlignment: .left, location: 172),   // meter
             NSTextTab(textAlignment: .right, location: 272),  // percentage
-            NSTextTab(textAlignment: .left, location: 284),   // reset countdown
+            NSTextTab(textAlignment: .left, location: 284),   // trend
+            NSTextTab(textAlignment: .left, location: 340),   // reset countdown
         ]
         line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
         return line

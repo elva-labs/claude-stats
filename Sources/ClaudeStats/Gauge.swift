@@ -4,12 +4,15 @@ import AppKit
 struct Gauge {
     let shortLabel: String   // "S", "W", "F" — what goes in the menu bar
     let longLabel: String    // "Session (5h)" — what goes in the dropdown
+    let seriesKey: String    // stable identity for this quota's recorded history
     let percent: Int
     let severity: Severity
     let resetsAt: Date?
     let sortKey: Int
     /// Spent — there is nothing left to report as a percentage, only a wait.
     let isExhausted: Bool
+    /// How much history the row's trend line covers.
+    let trendWindow: TimeInterval
 
     enum Severity {
         case normal, warning, critical
@@ -25,6 +28,11 @@ struct Gauge {
     init(limit: Limit) {
         let modelName = limit.scope?.model?.displayName
         let isSession = (limit.group ?? limit.kind).hasPrefix("session")
+
+        seriesKey = limit.seriesKey
+        // How far back the trend reaches: one full window, so the trace covers the
+        // quota's own cycle rather than an arbitrary slice of it.
+        trendWindow = isSession ? 5 * 3_600 : 7 * 86_400
 
         if let modelName, let initial = modelName.first {
             shortLabel = String(initial).uppercased()
