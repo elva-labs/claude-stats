@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build app bundle
+        run: SKIP_INSTALL=1 ./build.sh
+
+      - name: Verify signature
+        run: codesign --verify --deep --strict "dist/Claude Stats.app"

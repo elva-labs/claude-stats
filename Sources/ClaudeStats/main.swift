@@ -47,7 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Claude always; Codex only when its CLI credentials exist on this machine,
     /// so people without Codex never see an OpenAI section erroring at them.
-    private let providers: [Provider] = [.claude] + (CodexAPI.isAvailable ? [.codex] : [])
+    /// Computed, not stored: a `codex login` or `codex logout` mid-run changes the
+    /// answer, and freezing it at launch would show a section erroring forever
+    /// (or never appearing) until the app is restarted.
+    private var providers: [Provider] { [.claude] + (CodexAPI.isAvailable ? [.codex] : []) }
     private var states: [Provider: ProviderState] = [:]
 
     private var isFetching = false
@@ -149,8 +152,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let now = Date()
 
-        // A quota coming back is worth knowing about promptly, whatever the cadence.
-        if allGauges.contains(where: { $0.resetsAt.map { $0 <= now } ?? false }) {
+        // A quota coming back is worth knowing about promptly, whatever the
+        // cadence — but only for a provider that can actually be asked. A gauge
+        // whose provider is throttled keeps its stale reset time for the whole
+        // backoff, and letting it trip this fast path would hammer the *other*
+        // provider once a minute for nothing.
+        let askable = providers.filter { (state($0).throttledUntil ?? .distantPast) <= now }
+        if askable.contains(where: { provider in
+            state(provider).gauges.contains { $0.resetsAt.map { $0 <= now } ?? false }
+        }) {
             refresh()
             return
         }
@@ -208,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         Task {
             defer { isFetching = false }
+            var anySucceeded = false
             await withTaskGroup(of: (Provider, Result<Fetched, Error>).self) { group in
                 for provider in due {
                     group.addTask {
@@ -235,23 +246,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         }
                     }
                 }
+                // Repaint as each provider lands rather than once at the end: a
+                // stale Codex token can take ~90s of CLI renewals while Claude's
+                // answer arrived in two, and fresh numbers shouldn't wait on the
+                // straggler.
                 for await (provider, outcome) in group {
-                    apply(outcome, to: provider)
+                    anySucceeded = apply(outcome, to: provider) || anySucceeded
+                    repaint()
                 }
             }
 
-            let signature = Self.signature(of: allGauges)
-            if signature == lastSignature {
-                unchangedPolls += 1
-            } else {
-                unchangedPolls = 0
-                lastSignature = signature
+            // The cadence backoff reads "unchanged" as "nothing is happening", which
+            // only follows from a reading that actually arrived — a failed poll says
+            // nothing about whether the numbers moved.
+            if anySucceeded {
+                let signature = Self.signature(of: allGauges)
+                if signature == lastSignature {
+                    unchangedPolls += 1
+                } else {
+                    unchangedPolls = 0
+                    lastSignature = signature
+                }
             }
-            repaint()
         }
     }
 
-    private func apply(_ outcome: Result<Fetched, Error>, to provider: Provider) {
+    /// Returns whether this outcome was a successful reading.
+    @discardableResult
+    private func apply(_ outcome: Result<Fetched, Error>, to provider: Provider) -> Bool {
         var s = state(provider)
         switch outcome {
         case .success(let fetched):
@@ -271,6 +293,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             s.throttledUntil = nil
             s.backoffStep = 0
             s.lastUpdated = Date()
+            states[provider] = s
+            return true
         case .failure(let error):
             switch Self.classify(error) {
             case .rateLimited(let retryAfter):
@@ -294,8 +318,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 s.lastError = error.localizedDescription
                 s.needsInteractiveLogin = false
             }
+            states[provider] = s
+            return false
         }
-        states[provider] = s
     }
 
     private enum FailureKind {
@@ -309,7 +334,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case UsageAPI.APIError.rateLimited(let retryAfter),
              CodexAPI.APIError.rateLimited(let retryAfter):
             return .rateLimited(retryAfter: retryAfter)
-        case UsageAPI.APIError.unauthorized, CodexAPI.APIError.unauthorized:
+        case UsageAPI.APIError.unauthorized, CodexAPI.APIError.unauthorized,
+             CodexAPI.APIError.notLoggedIn, Keychain.TokenError.notFound:
+            // "Not logged in" belongs with "login expired": both are fixed by the
+            // Sign In menu item, which only appears for auth-classified failures.
             return .auth
         default:
             return .other
@@ -362,6 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 provider: provider,
                 gauges: s.gauges.filter(BarSelection.shows),
                 hasError: s.lastError != nil,
+                hasData: !s.gauges.isEmpty,
                 staleness: Staleness(lastUpdated: s.lastUpdated),
                 lastUpdated: s.lastUpdated
             )
@@ -494,7 +523,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(show)
         }
 
-        if let lastUpdated = providers.compactMap({ state($0).lastUpdated }).max() {
+        // The *oldest* update across providers, so one healthy provider can't put
+        // a fresh-looking timestamp over the other's hours-stale figures.
+        if let lastUpdated = providers.compactMap({ state($0).lastUpdated }).min() {
             let f = DateFormatter()
             f.dateFormat = "HH:mm:ss"
             let note = providers.contains(where: { state($0).renewedLogin }) ? " · renewed login" : ""
@@ -577,8 +608,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleBarGauge(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        BarSelection.toggle(id, current: allGauges)
+        guard let id = sender.representedObject as? String,
+              let gauge = allGauges.first(where: { $0.id == id }) else { return }
+        BarSelection.toggle(gauge)
         repaint()
     }
 

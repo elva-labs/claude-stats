@@ -28,27 +28,26 @@ enum Provider: String, Codable, CaseIterable {
 /// Which gauges appear in the menu bar itself. Everything always appears in the
 /// dropdown; this only decides what takes up bar space.
 ///
-/// `nil` (nothing stored) means the default: every Claude gauge, no Codex ones —
-/// the app's original behaviour. The set only materialises once the user toggles
-/// a row, and from then on newly appearing gauges stay off until chosen.
+/// Only explicit choices are stored, as per-gauge overrides of the default rule
+/// (Claude in, Codex out). Gauges never toggled keep following the rule, so a new
+/// Claude quota appearing on the plan shows up in the bar without asking, and a
+/// toggle made while one provider happens to be failing can't freeze a snapshot
+/// of the moment into the settings.
 enum BarSelection {
-    private static let key = "barGaugeIDs"
+    private static let key = "barGaugeOverrides"
 
-    private static var stored: Set<String>? {
-        get { (UserDefaults.standard.array(forKey: key) as? [String]).map(Set.init) }
-        set { UserDefaults.standard.set(newValue.map(Array.init), forKey: key) }
+    private static var overrides: [String: Bool] {
+        get { UserDefaults.standard.dictionary(forKey: key) as? [String: Bool] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 
     static func shows(_ gauge: Gauge) -> Bool {
-        guard let stored else { return gauge.provider == .claude }
-        return stored.contains(gauge.id)
+        overrides[gauge.id] ?? (gauge.provider == .claude)
     }
 
-    /// Flip one gauge, materialising the default selection on first use so the
-    /// other checkmarks don't jump.
-    static func toggle(_ id: String, current: [Gauge]) {
-        var set = stored ?? Set(current.filter { $0.provider == .claude }.map(\.id))
-        if set.contains(id) { set.remove(id) } else { set.insert(id) }
-        stored = set
+    static func toggle(_ gauge: Gauge) {
+        var map = overrides
+        map[gauge.id] = !shows(gauge)
+        overrides = map
     }
 }

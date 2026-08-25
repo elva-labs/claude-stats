@@ -17,9 +17,23 @@ enum CodexAPI {
     /// Whether this machine has a Codex ChatGPT login worth polling at all.
     /// API-key-only configurations are excluded — the usage endpoint serves
     /// subscription quotas, which an API key doesn't have.
+    ///
+    /// Checked live (memoised on the file's modification date, since it is asked
+    /// on every repaint) so a `codex login` or `codex logout` mid-run takes
+    /// effect without relaunching the app.
     static var isAvailable: Bool {
-        (try? credentials()) != nil
+        let mtime = (try? FileManager.default
+            .attributesOfItem(atPath: authFile.path))?[.modificationDate] as? Date
+        availabilityLock.lock()
+        defer { availabilityLock.unlock() }
+        if let availability, availability.mtime == mtime { return availability.available }
+        let available = (try? credentials()) != nil
+        availability = (mtime, available)
+        return available
     }
+
+    private static let availabilityLock = NSLock()
+    nonisolated(unsafe) private static var availability: (mtime: Date?, available: Bool)?
 
     enum APIError: LocalizedError {
         case notLoggedIn
@@ -214,18 +228,22 @@ enum CodexAPI {
     }
 
     private static func limits(from rateLimit: WhamUsage.RateLimit?, scopeName: String?) -> [Limit] {
-        [rateLimit?.primaryWindow, rateLimit?.secondaryWindow].compactMap { window in
+        [(rateLimit?.primaryWindow, true), (rateLimit?.secondaryWindow, false)].compactMap { window, isPrimary in
             guard let window, let percent = window.usedPercent else { return nil }
 
-            let seconds = window.limitWindowSeconds ?? 0
             // ≤ 6h → the session window, ≤ 8 days → the weekly one; anything
             // longer is a monthly lane, which `Gauge` prettifies from the kind.
+            // A window that omits its length falls back to position (primary is
+            // the short one) — defaulting the length to 0 instead would classify
+            // the weekly window as a second "session" and collide their series.
+            let weekly = (scopeName == nil ? "weekly_all" : "weekly_scoped", "weekly")
             let kind: String
             let group: String
-            switch seconds {
-            case ..<21_600: (kind, group) = ("session", "session")
-            case ..<700_000: (kind, group) = (scopeName == nil ? "weekly_all" : "weekly_scoped", "weekly")
-            default: (kind, group) = ("monthly", "monthly")
+            switch window.limitWindowSeconds {
+            case .some(..<21_600): (kind, group) = ("session", "session")
+            case .some(..<700_000): (kind, group) = weekly
+            case .some: (kind, group) = ("monthly", "monthly")
+            case nil: (kind, group) = isPrimary ? ("session", "session") : weekly
             }
 
             let resetsAt = window.resetAt.map(Date.init(timeIntervalSince1970:))
@@ -254,8 +272,10 @@ enum CodexAPI {
         if let credits = wham.credits, credits.hasCredits == true {
             if credits.unlimited == true {
                 parts.append("unlimited credits")
-            } else if let balance = credits.balance?.value {
-                let rounded = balance == balance.rounded()
+            } else if let balance = credits.balance?.value, balance.isFinite {
+                // The range guard matters: `Int(_: Double)` traps beyond Int range,
+                // and the balance is server-controlled.
+                let rounded = balance == balance.rounded() && abs(balance) < 1e15
                     ? String(Int(balance))
                     : String(format: "%.2f", balance)
                 parts.append("\(rounded) credits")

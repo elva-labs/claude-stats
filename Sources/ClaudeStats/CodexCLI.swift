@@ -61,7 +61,9 @@ enum CodexCLI {
         let stdout = Pipe()
         process.standardInput = stdin
         process.standardOutput = stdout
-        process.standardError = Pipe()
+        // Discarded, not piped: an unread pipe fills at ~64KB and a chatty server
+        // (RUST_LOG et al. are inherited) would deadlock against it mid-answer.
+        process.standardError = FileHandle.nullDevice
 
         return await withCheckedContinuation { continuation in
             let resumed = Resumed()

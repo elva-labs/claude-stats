@@ -1,0 +1,113 @@
+name: Release
+
+# Two ways in:
+#   - push a tag `v1.2.0`
+#   - run the workflow manually with a version, which creates that tag for you
+#
+# Signing and notarization activate automatically once the repository has the
+# secrets below; without them the release ships ad-hoc signed and the release
+# notes tell users how to open it past Gatekeeper.
+#
+#   MACOS_CERTIFICATE           base64 of a Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD  password for that .p12
+#   MACOS_SIGN_IDENTITY         e.g. "Developer ID Application: Elva Labs (TEAMID)"
+#   NOTARY_KEY                  base64 of an App Store Connect API .p8 key
+#   NOTARY_KEY_ID               its key id
+#   NOTARY_ISSUER_ID            its issuer id
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.2.0, without the v)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    if: github.repository == 'elva-labs/claude-stats'
+    env:
+      HAVE_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      HAVE_NOTARY: ${{ secrets.NOTARY_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import signing certificate
+        if: env.HAVE_CERT == 'true'
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN=release.keychain-db
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 1800 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$CERT" | base64 -d > cert.p12
+          security import cert.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm cert.p12
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+      - name: Build
+        env:
+          SIGN_IDENTITY: ${{ env.HAVE_CERT == 'true' && secrets.MACOS_SIGN_IDENTITY || '-' }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}" SKIP_INSTALL=1 ./build.sh
+
+      - name: Notarize and staple
+        if: env.HAVE_CERT == 'true' && env.HAVE_NOTARY == 'true'
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "$NOTARY_KEY" | base64 -d > notary.p8
+          ditto -c -k --keepParent "dist/Claude Stats.app" notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --key notary.p8 --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+          rm notary.p8 notarize.zip
+          xcrun stapler staple "dist/Claude Stats.app"
+
+      - name: Package
+        run: ditto -c -k --keepParent "dist/Claude Stats.app" "Claude-Stats.zip"
+
+      - name: Create tag (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "elva-bot"
+          git config user.email "gh-bot@elva-group.com"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES=""
+          if [[ "$HAVE_CERT" != "true" ]]; then
+            NOTES=$'\n> [!NOTE]\n> This build is not yet notarized. After unzipping, right-click the app and choose **Open** the first time, or run `xattr -dr com.apple.quarantine "/Applications/Claude Stats.app"`.'
+          fi
+          gh release create "v${{ steps.version.outputs.version }}" "Claude-Stats.zip" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --notes "$NOTES"

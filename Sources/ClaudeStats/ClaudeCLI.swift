@@ -37,8 +37,10 @@ enum ClaudeCLI {
         let process = Process()
         process.executableURL = executable
         process.arguments = ["auth", "status", "--json"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        // Discarded, not piped: nothing reads them, and an unread pipe deadlocks
+        // the child once its ~64KB buffer fills.
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         // Keep it non-interactive: no TTY, so it can never sit waiting for input.
         process.standardInput = FileHandle.nullDevice
 

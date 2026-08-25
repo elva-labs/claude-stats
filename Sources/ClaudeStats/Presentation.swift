@@ -16,8 +16,11 @@ enum Presentation {
     /// endpoint failing says nothing about the other.
     struct BarGroup {
         let provider: Provider
-        let gauges: [Gauge]
+        let gauges: [Gauge]      // the ones chosen for the bar; the dropdown shows all
         let hasError: Bool
+        /// Whether the provider has any reading at all, shown in the bar or not —
+        /// what separates "everything unchecked" from "nothing fetched yet".
+        let hasData: Bool
         let staleness: Staleness
         let lastUpdated: Date?
 
@@ -25,12 +28,14 @@ enum Presentation {
             provider: Provider,
             gauges: [Gauge],
             hasError: Bool,
+            hasData: Bool = false,
             staleness: Staleness = .fresh,
             lastUpdated: Date? = nil
         ) {
             self.provider = provider
             self.gauges = gauges
             self.hasError = hasError
+            self.hasData = hasData || !gauges.isEmpty
             self.staleness = staleness
             self.lastUpdated = lastUpdated
         }
@@ -38,7 +43,39 @@ enum Presentation {
 
     static func statusTitle(groups: [BarGroup], isPaused: Bool = false) -> NSAttributedString {
         let populated = groups.filter { !$0.gauges.isEmpty }
+        // A provider kept out of the bar can still be failing — that gets a compact
+        // tagged flag rather than silence, because "quietly hidden" and "quietly
+        // broken" must not look the same.
+        let errorOnly = groups.filter { $0.gauges.isEmpty && $0.hasError }
+
+        func errorFlags(into title: NSMutableAttributedString) {
+            for group in errorOnly {
+                title.append(NSAttributedString(
+                    string: " \(group.provider.barTag)",
+                    attributes: [
+                        .font: markerFont,
+                        .foregroundColor: NSColor.tertiaryLabelColor,
+                        .baselineOffset: 0.5,
+                    ]
+                ))
+                title.append(NSAttributedString(
+                    string: "⚠︎",
+                    attributes: [.font: markerFont, .foregroundColor: NSColor.systemRed]
+                ))
+            }
+        }
+
         guard !populated.isEmpty else {
+            // Data exists but the user unchecked every gauge: a bare identity, not
+            // the loading ellipsis, which would claim something is still coming.
+            if groups.contains(where: \.hasData) {
+                let title = NSMutableAttributedString(
+                    string: "CC",
+                    attributes: [.font: numberFont, .foregroundColor: NSColor.secondaryLabelColor]
+                )
+                errorFlags(into: title)
+                return title
+            }
             let hasError = groups.contains(where: \.hasError)
             return NSAttributedString(
                 string: hasError ? "CC ⚠︎" : "CC …",
@@ -152,6 +189,7 @@ enum Presentation {
                 ))
             }
         }
+        errorFlags(into: title)
         return title
     }
 
