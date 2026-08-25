@@ -105,7 +105,7 @@ jobs:
         run: |
           NOTES=""
           if [[ "$HAVE_CERT" != "true" ]]; then
-            NOTES=$'\n> [!NOTE]\n> This build is not yet notarized. After unzipping, right-click the app and choose **Open** the first time, or run `xattr -dr com.apple.quarantine "/Applications/Claude Stats.app"`.'
+            NOTES=$'\n> [!NOTE]\n> This build is not yet notarized, so macOS will refuse to open it at first. Either run `xattr -dr com.apple.quarantine "/Applications/Claude Stats.app"` after installing, or open it once, then approve it under **System Settings → Privacy & Security → Open Anyway**.'
           fi
           gh release create "v${{ steps.version.outputs.version }}" "Claude-Stats.zip" \
             --title "v${{ steps.version.outputs.version }}" \
