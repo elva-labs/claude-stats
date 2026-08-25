@@ -16,6 +16,21 @@ s 49% · w 6% · f 12%
 Markers are derived from the API response, so any additional scoped limit your plan
 gains (Opus, Sonnet, Cowork, …) shows up automatically with its own initial.
 
+## OpenAI too
+
+If the machine has a Codex ChatGPT login (`~/.codex/auth.json`), the dropdown grows
+an **OpenAI** section with the same treatment — session/weekly quotas, meters, reset
+countdowns, plan and credits — alongside the **Claude** section. Which quotas occupy
+the menu bar itself is chosen per quota under **Show in Menu Bar**; the default is
+every Claude gauge and no OpenAI ones, i.e. exactly the original bar. When gauges
+from both providers are visible at once, each group carries a small `CC` / `GPT` tag,
+since both providers have a session and a weekly quota and the letters alone would
+stop identifying anything.
+
+The two endpoints fail independently, so error, staleness and rate-limit backoff are
+tracked per provider — Anthropic throttling us says nothing about OpenAI, and an
+expired Codex login never hides your Claude numbers.
+
 ## Reading it
 
 The marker is set small and grey; the number is what your eye lands on. Its colour
@@ -117,6 +132,22 @@ GET https://api.anthropic.com/api/oauth/usage
 Authorization: Bearer <access token>
 anthropic-beta: oauth-2025-04-20
 ```
+
+Codex works the same way with its own pieces: the OAuth access token in
+`~/.codex/auth.json` (read-only, never the refresh token) against
+
+```
+GET https://chatgpt.com/backend-api/wham/usage
+Authorization: Bearer <access token>
+ChatGPT-Account-Id: <account id>
+```
+
+whose `rate_limit` windows are classified by their length — 5 hours → session, a
+week → weekly — not their position, because some plans send only one window. When
+the token goes stale the app asks the Codex CLI to renew it over the CLI's
+`app-server` JSON-RPC mode (`account/rateLimits/read`, read-only sandbox, no
+inference), then re-reads the file — the CLI stays sole owner of the rotating
+refresh token, for the same reason as Claude Code below.
 
 The response's `limits[]` array is the source of truth:
 
@@ -271,7 +302,10 @@ Requires macOS 14+ and the Swift toolchain that ships with Xcode.
 | File | Purpose |
 |------|---------|
 | `Sources/ClaudeStats/main.swift` | Status item, menu, polling loop |
-| `Sources/ClaudeStats/UsageAPI.swift` | Endpoint client and response decoding |
+| `Sources/ClaudeStats/Provider.swift` | Provider identities and the menu-bar selection |
+| `Sources/ClaudeStats/UsageAPI.swift` | Anthropic endpoint client and response decoding |
+| `Sources/ClaudeStats/CodexAPI.swift` | OpenAI endpoint client and response mapping |
+| `Sources/ClaudeStats/CodexCLI.swift` | Nudges the Codex CLI to renew its own login |
 | `Sources/ClaudeStats/Gauge.swift` | Limit → display model (labels, resets, severity) |
 | `Sources/ClaudeStats/Grade.swift` | The colour scale and the mini meters |
 | `Sources/ClaudeStats/Sparkline.swift` | The per-row trend line |

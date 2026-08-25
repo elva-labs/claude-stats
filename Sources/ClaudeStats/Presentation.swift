@@ -11,14 +11,35 @@ enum Presentation {
 
     // MARK: Menu bar
 
-    static func statusTitle(
-        gauges: [Gauge],
-        hasError: Bool,
-        isPaused: Bool = false,
-        staleness: Staleness = .fresh,
-        lastUpdated: Date? = nil
-    ) -> NSAttributedString {
-        guard !gauges.isEmpty else {
+    /// One provider's contribution to the menu bar: its visible gauges plus the
+    /// trust signals (staleness, error) that are tracked per provider, since one
+    /// endpoint failing says nothing about the other.
+    struct BarGroup {
+        let provider: Provider
+        let gauges: [Gauge]
+        let hasError: Bool
+        let staleness: Staleness
+        let lastUpdated: Date?
+
+        init(
+            provider: Provider,
+            gauges: [Gauge],
+            hasError: Bool,
+            staleness: Staleness = .fresh,
+            lastUpdated: Date? = nil
+        ) {
+            self.provider = provider
+            self.gauges = gauges
+            self.hasError = hasError
+            self.staleness = staleness
+            self.lastUpdated = lastUpdated
+        }
+    }
+
+    static func statusTitle(groups: [BarGroup], isPaused: Bool = false) -> NSAttributedString {
+        let populated = groups.filter { !$0.gauges.isEmpty }
+        guard !populated.isEmpty else {
+            let hasError = groups.contains(where: \.hasError)
             return NSAttributedString(
                 string: hasError ? "CC ⚠︎" : "CC …",
                 attributes: [
@@ -38,73 +59,98 @@ enum Presentation {
                 attributes: [.font: markerFont, .foregroundColor: NSColor.tertiaryLabelColor]
             ))
         }
-        // Paused means "deliberately not updating"; stale means "couldn't update".
-        // Both stop short of hiding the numbers, but they read differently: paused is
-        // flat grey, stale keeps the grade and simply recedes.
-        let fade = isPaused ? 1 : staleness.opacity
-        func tint(_ live: NSColor) -> NSColor {
-            let base = isPaused ? NSColor.tertiaryLabelColor : live
-            return fade < 1 ? base.withAlphaComponent(fade) : base
-        }
 
-        for (index, gauge) in gauges.enumerated() {
-            if index > 0 {
-                title.append(NSAttributedString(
-                    string: " · ",
-                    attributes: [.font: markerFont, .foregroundColor: NSColor.tertiaryLabelColor]
-                ))
+        // Both providers have a session and a weekly quota, so once two groups are
+        // visible the letters alone stop identifying anything — each group then
+        // carries its provider tag. A single group keeps the original untagged look.
+        let needsTags = populated.count > 1
+
+        for (groupIndex, group) in populated.enumerated() {
+            // Paused means "deliberately not updating"; stale means "couldn't
+            // update". Both stop short of hiding the numbers, but they read
+            // differently: paused is flat grey, stale keeps the grade and recedes.
+            let fade = isPaused ? 1 : group.staleness.opacity
+            func tint(_ live: NSColor) -> NSColor {
+                let base = isPaused ? NSColor.tertiaryLabelColor : live
+                return fade < 1 ? base.withAlphaComponent(fade) : base
             }
 
-            // The marker recedes and the number leads: the letter says *which* quota,
-            // the colour and weight of the number say how much of it is gone.
-            title.append(NSAttributedString(
-                string: gauge.shortLabel,
-                attributes: [
-                    .font: markerFont,
-                    .foregroundColor: tint(.secondaryLabelColor),
-                    .baselineOffset: 0.5,
-                ]
-            ))
-            // Once a quota is spent, "100%" tells you nothing you can act on — the
-            // only useful number left is how long until it comes back.
-            if gauge.isExhausted, let eta = gauge.eta() {
+            if groupIndex > 0 {
                 title.append(NSAttributedString(
-                    string: "\u{2009}\(eta)",
-                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color(alpha: fade))]
+                    string: "   ",
+                    attributes: [.font: markerFont]
                 ))
-            } else {
+            }
+            if needsTags {
                 title.append(NSAttributedString(
-                    string: "\u{2009}\(gauge.percent)",
-                    attributes: [.font: numberFont, .foregroundColor: tint(gauge.color(alpha: fade))]
-                ))
-                title.append(NSAttributedString(
-                    string: "%",
+                    string: "\(group.provider.barTag) ",
                     attributes: [
-                        .font: unitFont,
-                        .foregroundColor: tint(Grade.color(percent: gauge.percent, severity: gauge.severity, alpha: 0.6 * fade)),
+                        .font: markerFont,
+                        .foregroundColor: tint(.tertiaryLabelColor),
                         .baselineOffset: 0.5,
                     ]
                 ))
             }
-        }
 
-        if staleness.warrantsAgeLabel, let lastUpdated, !isPaused {
-            title.append(NSAttributedString(
-                string: " \u{2009}\(Staleness.compactAge(since: lastUpdated))",
-                attributes: [
-                    .font: markerFont,
-                    .foregroundColor: NSColor.tertiaryLabelColor,
-                    .baselineOffset: 0.5,
-                ]
-            ))
-        }
+            for (index, gauge) in group.gauges.enumerated() {
+                if index > 0 {
+                    title.append(NSAttributedString(
+                        string: " · ",
+                        attributes: [.font: markerFont, .foregroundColor: NSColor.tertiaryLabelColor]
+                    ))
+                }
 
-        // A stale reading is worth flagging, but not worth hiding the numbers for.
-        if hasError {
-            title.append(NSAttributedString(
-                string: " ⚠︎",
-                attributes: [.font: markerFont, .foregroundColor: NSColor.systemRed]
-            ))
+                // The marker recedes and the number leads: the letter says *which*
+                // quota, the colour and weight of the number say how much is gone.
+                title.append(NSAttributedString(
+                    string: gauge.shortLabel,
+                    attributes: [
+                        .font: markerFont,
+                        .foregroundColor: tint(.secondaryLabelColor),
+                        .baselineOffset: 0.5,
+                    ]
+                ))
+                // Once a quota is spent, "100%" tells you nothing you can act on —
+                // the only useful number left is how long until it comes back.
+                if gauge.isExhausted, let eta = gauge.eta() {
+                    title.append(NSAttributedString(
+                        string: "\u{2009}\(eta)",
+                        attributes: [.font: numberFont, .foregroundColor: tint(gauge.color(alpha: fade))]
+                    ))
+                } else {
+                    title.append(NSAttributedString(
+                        string: "\u{2009}\(gauge.percent)",
+                        attributes: [.font: numberFont, .foregroundColor: tint(gauge.color(alpha: fade))]
+                    ))
+                    title.append(NSAttributedString(
+                        string: "%",
+                        attributes: [
+                            .font: unitFont,
+                            .foregroundColor: tint(Grade.color(percent: gauge.percent, severity: gauge.severity, alpha: 0.6 * fade)),
+                            .baselineOffset: 0.5,
+                        ]
+                    ))
+                }
+            }
+
+            if group.staleness.warrantsAgeLabel, let lastUpdated = group.lastUpdated, !isPaused {
+                title.append(NSAttributedString(
+                    string: " \u{2009}\(Staleness.compactAge(since: lastUpdated))",
+                    attributes: [
+                        .font: markerFont,
+                        .foregroundColor: NSColor.tertiaryLabelColor,
+                        .baselineOffset: 0.5,
+                    ]
+                ))
+            }
+
+            // A failing provider is worth flagging, but not worth hiding numbers for.
+            if group.hasError {
+                title.append(NSAttributedString(
+                    string: " ⚠︎",
+                    attributes: [.font: markerFont, .foregroundColor: NSColor.systemRed]
+                ))
+            }
         }
         return title
     }

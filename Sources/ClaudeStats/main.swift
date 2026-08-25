@@ -25,19 +25,31 @@ let minimumSpacing: TimeInterval = 60
 /// throttle — see `refresh(force:)`.
 let manualSpacing: TimeInterval = 15
 
+/// Everything one provider's endpoint has told us, plus how the conversation with
+/// it is going. Kept per provider because the two endpoints fail independently —
+/// Anthropic throttling us says nothing about OpenAI, and vice versa.
+struct ProviderState {
+    var gauges: [Gauge] = []
+    var extraUsage: ExtraUsage?
+    var footnote: String?
+    var lastError: String?
+    var lastUpdated: Date?
+    var renewedLogin = false
+    var needsInteractiveLogin = false
+    var throttledUntil: Date?
+    var backoffStep = 0
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
 
-    private var gauges: [Gauge] = []
-    private var extraUsage: ExtraUsage?
-    private var lastError: String?
-    private var lastUpdated: Date?
-    private var renewedLogin = false
-    private var needsInteractiveLogin = false
-    private var throttledUntil: Date?
-    private var backoffStep = 0
+    /// Claude always; Codex only when its CLI credentials exist on this machine,
+    /// so people without Codex never see an OpenAI section erroring at them.
+    private let providers: [Provider] = [.claude] + (CodexAPI.isAvailable ? [.codex] : [])
+    private var states: [Provider: ProviderState] = [:]
+
     private var isFetching = false
     private var menuIsOpen = false
     private var lastAttempt: Date?
@@ -46,6 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var displayAsleep = false
     private var screenLocked = false
     private let chart = ChartWindowController()
+
+    private var allGauges: [Gauge] { providers.flatMap { states[$0]?.gauges ?? [] } }
+    private func state(_ provider: Provider) -> ProviderState { states[provider] ?? ProviderState() }
 
     /// Nobody can see the menu bar right now, so nothing needs fetching for it.
     private var isIdle: Bool { displayAsleep || screenLocked }
@@ -70,11 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Show the last known reading immediately. The first fetch may be seconds
         // away, or — if the network is down or the endpoint is throttling — never.
-        if let snapshot = Store.load() {
-            gauges = Self.sorted(snapshot.limits)
-            lastUpdated = snapshot.savedAt
-            render()
+        for provider in providers {
+            guard let snapshot = Store.load(provider) else { continue }
+            var s = state(provider)
+            s.gauges = Self.sorted(snapshot.limits, provider: provider)
+            s.lastUpdated = snapshot.savedAt
+            states[provider] = s
         }
+        render()
 
         observeIdleState()
         refresh(force: true)
@@ -126,13 +144,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        if !gauges.isEmpty { repaint() }
+        if !allGauges.isEmpty { repaint() }
         guard !isPaused, !isIdle else { return }
 
         let now = Date()
 
         // A quota coming back is worth knowing about promptly, whatever the cadence.
-        if gauges.contains(where: { $0.resetsAt.map { $0 <= now } ?? false }) {
+        if allGauges.contains(where: { $0.resetsAt.map { $0 <= now } ?? false }) {
             refresh()
             return
         }
@@ -157,94 +175,158 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// fresh window registers as a change even when the percentage lands identically.
     private static func signature(of gauges: [Gauge]) -> String {
         gauges.map { gauge in
-            "\(gauge.shortLabel)\(gauge.percent)@\(gauge.resetsAt?.timeIntervalSince1970 ?? 0)"
+            "\(gauge.id)\(gauge.percent)@\(gauge.resetsAt?.timeIntervalSince1970 ?? 0)"
         }.joined(separator: "|")
     }
 
     // MARK: Data
 
+    /// What one provider's poll produced, in the shape the display needs.
+    private struct Fetched {
+        let limits: [Limit]
+        let extraUsage: ExtraUsage?
+        let footnote: String?
+        let renewedLogin: Bool
+    }
+
     private func refresh(force: Bool = false) {
         guard !isFetching, !isPaused else { return }
-        // The usage endpoint rate-limits, so a backoff is binding even on a manual
-        // refresh — hammering it while throttled only extends the throttle.
-        if let until = throttledUntil, until > Date() { return }
+        // The usage endpoints rate-limit, so a backoff is binding even on a manual
+        // refresh — hammering one while throttled only extends the throttle. A
+        // throttle on one provider never blocks the other.
+        let now = Date()
+        let due = providers.filter { (state($0).throttledUntil ?? .distantPast) <= now }
+        guard !due.isEmpty else { return }
 
         // Spacing is measured from the last *attempt*, not the last success: a failed
         // request costs the endpoint just as much as one that worked.
         let spacing = force ? manualSpacing : minimumSpacing
-        if let last = lastAttempt, Date().timeIntervalSince(last) < spacing { return }
+        if let last = lastAttempt, now.timeIntervalSince(last) < spacing { return }
 
-        lastAttempt = Date()
+        lastAttempt = now
         isFetching = true
 
         Task {
             defer { isFetching = false }
-            do {
-                let result = try await UsageAPI.fetch()
-                // Log transitions only — a line per successful poll would bury the
-                // few events that actually explain a problem.
-                if lastError != nil || throttledUntil != nil || lastUpdated == nil {
-                    Log.write("ok — \(result.usage.limits.count) limits")
+            await withTaskGroup(of: (Provider, Result<Fetched, Error>).self) { group in
+                for provider in due {
+                    group.addTask {
+                        do {
+                            switch provider {
+                            case .claude:
+                                let result = try await UsageAPI.fetch()
+                                return (provider, .success(Fetched(
+                                    limits: result.usage.limits,
+                                    extraUsage: result.usage.extraUsage,
+                                    footnote: nil,
+                                    renewedLogin: result.renewedLogin
+                                )))
+                            case .codex:
+                                let result = try await CodexAPI.fetch()
+                                return (provider, .success(Fetched(
+                                    limits: result.limits,
+                                    extraUsage: nil,
+                                    footnote: result.footnote,
+                                    renewedLogin: result.renewedLogin
+                                )))
+                            }
+                        } catch {
+                            return (provider, .failure(error))
+                        }
+                    }
                 }
-                gauges = Self.sorted(result.usage.limits)
-                Store.save(limits: result.usage.limits)
-                History.append(limits: result.usage.limits)
+                for await (provider, outcome) in group {
+                    apply(outcome, to: provider)
+                }
+            }
 
-                let signature = Self.signature(of: gauges)
-                if signature == lastSignature {
-                    unchangedPolls += 1
-                } else {
-                    unchangedPolls = 0
-                    lastSignature = signature
-                }
-                extraUsage = result.usage.extraUsage
-                renewedLogin = result.renewedLogin
-                lastError = nil
-                needsInteractiveLogin = false
-                throttledUntil = nil
-                backoffStep = 0
-                lastUpdated = Date()
-            } catch UsageAPI.APIError.rateLimited(let retryAfter) {
-                applyBackoff(retryAfter: retryAfter)
-            } catch {
-                lastError = error.localizedDescription
-                // Only an auth failure is something a human can fix by signing in;
-                // offering it for a network blip or a rate limit just misleads.
-                needsInteractiveLogin = error is UsageAPI.APIError
-                    && (error as? UsageAPI.APIError).map { if case .unauthorized = $0 { true } else { false } } == true
+            let signature = Self.signature(of: allGauges)
+            if signature == lastSignature {
+                unchangedPolls += 1
+            } else {
+                unchangedPolls = 0
+                lastSignature = signature
             }
             repaint()
         }
     }
 
-    /// Exponential backoff, honouring `Retry-After` when the server sends one.
-    /// Being throttled is a normal state to sit in, not an error to shout about, so
-    /// the last known figures stay on screen while it waits.
-    private func applyBackoff(retryAfter: TimeInterval?) {
-        backoffStep = min(backoffStep + 1, 5)
-        // The server has been seen sending `retry-after: 0`, which would mean no
-        // backoff at all — treat its hint as a floor to respect, never a licence to
-        // retry immediately.
-        let exponential = min(baseInterval * pow(2, Double(backoffStep)), 1800)
-        let delay = max(retryAfter ?? 0, exponential)
-        throttledUntil = Date().addingTimeInterval(delay)
-        lastError = nil
-        Log.write("throttled for \(Int(delay))s (step \(backoffStep))")
+    private func apply(_ outcome: Result<Fetched, Error>, to provider: Provider) {
+        var s = state(provider)
+        switch outcome {
+        case .success(let fetched):
+            // Log transitions only — a line per successful poll would bury the
+            // few events that actually explain a problem.
+            if s.lastError != nil || s.throttledUntil != nil || s.lastUpdated == nil {
+                Log.write("\(provider.rawValue) ok — \(fetched.limits.count) limits")
+            }
+            s.gauges = Self.sorted(fetched.limits, provider: provider)
+            Store.save(limits: fetched.limits, for: provider)
+            History.append(limits: fetched.limits, provider: provider)
+            s.extraUsage = fetched.extraUsage
+            s.footnote = fetched.footnote
+            s.renewedLogin = fetched.renewedLogin
+            s.lastError = nil
+            s.needsInteractiveLogin = false
+            s.throttledUntil = nil
+            s.backoffStep = 0
+            s.lastUpdated = Date()
+        case .failure(let error):
+            switch Self.classify(error) {
+            case .rateLimited(let retryAfter):
+                // Exponential backoff, honouring `Retry-After` when the server sends
+                // one. Being throttled is a normal state to sit in, not an error to
+                // shout about, so the last known figures stay on screen while it
+                // waits. The server has been seen sending `retry-after: 0`, so its
+                // hint is a floor to respect, never a licence to retry immediately.
+                s.backoffStep = min(s.backoffStep + 1, 5)
+                let exponential = min(baseInterval * pow(2, Double(s.backoffStep)), 1800)
+                let delay = max(retryAfter ?? 0, exponential)
+                s.throttledUntil = Date().addingTimeInterval(delay)
+                s.lastError = nil
+                Log.write("\(provider.rawValue) throttled for \(Int(delay))s (step \(s.backoffStep))")
+            case .auth:
+                s.lastError = error.localizedDescription
+                // Only an auth failure is something a human can fix by signing in;
+                // offering it for a network blip or a rate limit just misleads.
+                s.needsInteractiveLogin = true
+            case .other:
+                s.lastError = error.localizedDescription
+                s.needsInteractiveLogin = false
+            }
+        }
+        states[provider] = s
     }
 
-    private static func sorted(_ limits: [Limit]) -> [Gauge] {
-        limits.map(Gauge.init(limit:))
+    private enum FailureKind {
+        case rateLimited(retryAfter: TimeInterval?)
+        case auth
+        case other
+    }
+
+    private static func classify(_ error: Error) -> FailureKind {
+        switch error {
+        case UsageAPI.APIError.rateLimited(let retryAfter),
+             CodexAPI.APIError.rateLimited(let retryAfter):
+            return .rateLimited(retryAfter: retryAfter)
+        case UsageAPI.APIError.unauthorized, CodexAPI.APIError.unauthorized:
+            return .auth
+        default:
+            return .other
+        }
+    }
+
+    private static func sorted(_ limits: [Limit], provider: Provider) -> [Gauge] {
+        limits.map { Gauge(limit: $0, provider: provider) }
             .sorted { ($0.sortKey, $0.longLabel) < ($1.sortKey, $1.longLabel) }
     }
-
-    private var staleness: Staleness { Staleness(lastUpdated: lastUpdated) }
 
     private func repaint() {
         render()
         if menuIsOpen, let menu = statusItem.menu { rebuild(menu) }
         // The chart outlives the menu that opened it, so it has to be fed separately.
         if chart.isVisible, let key = chart.shownKey,
-           let gauge = gauges.first(where: { $0.seriesKey == key }) {
+           let gauge = allGauges.first(where: { $0.seriesKey == key }) {
             chart.update(gauge: gauge, samples: trend(for: gauge))
         }
     }
@@ -274,13 +356,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Menu bar title
 
     private func render() {
-        statusItem.button?.attributedTitle = Presentation.statusTitle(
-            gauges: gauges,
-            hasError: lastError != nil,
-            isPaused: isPaused,
-            staleness: staleness,
-            lastUpdated: lastUpdated
-        )
+        let groups = providers.map { provider -> Presentation.BarGroup in
+            let s = state(provider)
+            return Presentation.BarGroup(
+                provider: provider,
+                gauges: s.gauges.filter(BarSelection.shows),
+                hasError: s.lastError != nil,
+                staleness: Staleness(lastUpdated: s.lastUpdated),
+                lastUpdated: s.lastUpdated
+            )
+        }
+        statusItem.button?.attributedTitle = Presentation.statusTitle(groups: groups, isPaused: isPaused)
     }
 
     // MARK: Dropdown
@@ -298,26 +384,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuild(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        if let lastError {
-            menu.addItem(disabled(lastError, color: .systemRed))
-            if needsInteractiveLogin, ClaudeCLI.executable != nil {
-                let signIn = NSMenuItem(title: "Sign In to Claude Code…", action: #selector(signIn), keyEquivalent: "")
-                signIn.target = self
-                menu.addItem(signIn)
-            }
-            menu.addItem(.separator())
-        }
-
-        if let until = throttledUntil, until > Date() {
-            let f = DateFormatter()
-            f.dateFormat = "HH:mm:ss"
-            menu.addItem(disabled(
-                "Rate limited by the usage API · retrying \(f.string(from: until))",
-                color: .secondaryLabelColor
-            ))
-            menu.addItem(.separator())
-        }
-
         if isPaused, let until = pausedUntil {
             let f = DateFormatter()
             f.dateFormat = "HH:mm"
@@ -328,49 +394,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        for gauge in gauges {
-            let title = Presentation.row(for: gauge, trend: trend(for: gauge))
+        // One provider keeps the original flat list; two get labelled sections.
+        let sectioned = providers.count > 1
 
-            let item = NSMenuItem(title: "", action: #selector(openChart(_:)), keyEquivalent: "")
-            item.target = self
-            item.attributedTitle = title
-            item.representedObject = gauge.seriesKey
-            menu.addItem(item)
+        for (index, provider) in providers.enumerated() {
+            let s = state(provider)
 
-            // Same row, shown only while Option is held. An alternate has to follow
-            // its primary directly and share its (empty) key equivalent.
-            let copy = NSMenuItem(title: "", action: #selector(copyRow(_:)), keyEquivalent: "")
-            copy.target = self
-            copy.attributedTitle = title
-            copy.isAlternate = true
-            copy.keyEquivalentModifierMask = .option
-            copy.representedObject = "\(gauge.longLabel): \(gauge.percent)%"
-                + (gauge.resetDescription().map { ", \($0)" } ?? "")
-            menu.addItem(copy)
-        }
-
-        if let extra = extraUsage, extra.isEnabled == true {
-            menu.addItem(.separator())
-            var text = "Extra usage"
-            if let used = extra.usedCredits {
-                let symbol = extra.currency == "USD" ? "$" : ""
-                text += ": \(symbol)\(String(format: "%.2f", used))"
-                if let cap = extra.monthlyLimit {
-                    text += " of \(symbol)\(String(format: "%.2f", cap))"
-                }
-            } else if let pct = extra.utilization {
-                text += ": \(Int(pct.rounded()))%"
+            if sectioned {
+                if index > 0 { menu.addItem(.separator()) }
+                menu.addItem(disabled(
+                    provider.displayName.uppercased(),
+                    color: .tertiaryLabelColor,
+                    size: 10.5
+                ))
             }
-            menu.addItem(disabled(text, color: .secondaryLabelColor))
+
+            if let error = s.lastError {
+                menu.addItem(disabled(error, color: .systemRed))
+                if s.needsInteractiveLogin, Self.canOpenLogin(provider) {
+                    let title = provider == .claude ? "Sign In to Claude Code…" : "Sign In to Codex…"
+                    let signIn = NSMenuItem(title: title, action: #selector(signIn(_:)), keyEquivalent: "")
+                    signIn.target = self
+                    signIn.representedObject = provider.rawValue
+                    menu.addItem(signIn)
+                }
+            }
+
+            if let until = s.throttledUntil, until > Date() {
+                let f = DateFormatter()
+                f.dateFormat = "HH:mm:ss"
+                menu.addItem(disabled(
+                    "Rate limited by the usage API · retrying \(f.string(from: until))",
+                    color: .secondaryLabelColor
+                ))
+            }
+
+            // A section that hasn't produced anything yet still deserves a body,
+            // or the header floats over the next section's rows.
+            if s.gauges.isEmpty, s.lastError == nil {
+                menu.addItem(disabled("Waiting for first reading…", color: .tertiaryLabelColor))
+            }
+
+            for gauge in s.gauges {
+                let title = Presentation.row(for: gauge, trend: trend(for: gauge))
+
+                let item = NSMenuItem(title: "", action: #selector(openChart(_:)), keyEquivalent: "")
+                item.target = self
+                item.attributedTitle = title
+                item.representedObject = gauge.seriesKey
+                menu.addItem(item)
+
+                // Same row, shown only while Option is held. An alternate has to
+                // follow its primary directly and share its (empty) key equivalent.
+                let copy = NSMenuItem(title: "", action: #selector(copyRow(_:)), keyEquivalent: "")
+                copy.target = self
+                copy.attributedTitle = title
+                copy.isAlternate = true
+                copy.keyEquivalentModifierMask = .option
+                copy.representedObject = "\(gauge.longLabel): \(gauge.percent)%"
+                    + (gauge.resetDescription().map { ", \($0)" } ?? "")
+                menu.addItem(copy)
+            }
+
+            if let extra = s.extraUsage, extra.isEnabled == true {
+                var text = "Extra usage"
+                if let used = extra.usedCredits {
+                    let symbol = extra.currency == "USD" ? "$" : ""
+                    text += ": \(symbol)\(String(format: "%.2f", used))"
+                    if let cap = extra.monthlyLimit {
+                        text += " of \(symbol)\(String(format: "%.2f", cap))"
+                    }
+                } else if let pct = extra.utilization {
+                    text += ": \(Int(pct.rounded()))%"
+                }
+                menu.addItem(disabled(text, color: .secondaryLabelColor))
+            }
+
+            if let footnote = s.footnote {
+                menu.addItem(disabled(footnote, color: .secondaryLabelColor))
+            }
         }
 
         menu.addItem(.separator())
 
-        if let lastUpdated {
+        if !allGauges.isEmpty {
+            let show = NSMenuItem(title: "Show in Menu Bar", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for gauge in allGauges {
+                let title = sectioned
+                    ? "\(gauge.provider.displayName) · \(gauge.longLabel)"
+                    : gauge.longLabel
+                let item = NSMenuItem(title: title, action: #selector(toggleBarGauge(_:)), keyEquivalent: "")
+                item.target = self
+                item.state = BarSelection.shows(gauge) ? .on : .off
+                item.representedObject = gauge.id
+                submenu.addItem(item)
+            }
+            show.submenu = submenu
+            menu.addItem(show)
+        }
+
+        if let lastUpdated = providers.compactMap({ state($0).lastUpdated }).max() {
             let f = DateFormatter()
             f.dateFormat = "HH:mm:ss"
-            let note = renewedLogin ? " · renewed login" : ""
+            let note = providers.contains(where: { state($0).renewedLogin }) ? " · renewed login" : ""
             let cadence = " · every \(Int(currentInterval / 60))m"
+            let staleness = Staleness(lastUpdated: lastUpdated)
             let age = staleness.warrantsAgeLabel
                 ? " (\(Staleness.compactAge(since: lastUpdated)) ago)"
                 : ""
@@ -415,9 +544,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    private static func canOpenLogin(_ provider: Provider) -> Bool {
+        switch provider {
+        case .claude: return ClaudeCLI.executable != nil
+        case .codex: return CodexCLI.executable != nil
+        }
+    }
+
     // MARK: Actions
 
-    @objc private func refreshNow() { refresh(force: throttledUntil == nil) }
+    @objc private func refreshNow() {
+        let throttled = providers.allSatisfy { (state($0).throttledUntil ?? .distantPast) > Date() }
+        refresh(force: !throttled)
+    }
 
     private func trend(for gauge: Gauge) -> [History.Sample] {
         History.series(for: gauge.seriesKey, since: Date().addingTimeInterval(-gauge.trendWindow))
@@ -425,11 +564,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openChart(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String,
-              let gauge = gauges.first(where: { $0.seriesKey == key }) else { return }
+              let gauge = allGauges.first(where: { $0.seriesKey == key }) else { return }
         chart.show(gauge: gauge, samples: trend(for: gauge))
     }
 
-    @objc private func signIn() { ClaudeCLI.openInteractiveLogin() }
+    @objc private func signIn(_ sender: NSMenuItem) {
+        switch (sender.representedObject as? String).flatMap(Provider.init(rawValue:)) {
+        case .claude: ClaudeCLI.openInteractiveLogin()
+        case .codex: CodexCLI.openInteractiveLogin()
+        case nil: break
+        }
+    }
+
+    @objc private func toggleBarGauge(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        BarSelection.toggle(id, current: allGauges)
+        repaint()
+    }
 
     @objc private func copyRow(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }

@@ -2,6 +2,7 @@ import AppKit
 
 /// A single limit, shaped for display.
 struct Gauge {
+    let provider: Provider
     let shortLabel: String   // "S", "W", "F" — what goes in the menu bar
     let longLabel: String    // "Session (5h)" — what goes in the dropdown
     let seriesKey: String    // stable identity for this quota's recorded history
@@ -14,6 +15,12 @@ struct Gauge {
     /// How much history the row's trend line covers.
     let trendWindow: TimeInterval
 
+    /// Stable across polls, so the menu-bar selection survives percentages and
+    /// reset times changing under it.
+    var id: String { "\(provider.rawValue):\(kind):\(scopeName ?? "")" }
+    private let kind: String
+    private let scopeName: String?
+
     enum Severity {
         case normal, warning, critical
     }
@@ -25,11 +32,14 @@ struct Gauge {
         Grade.color(percent: percent, severity: severity, alpha: alpha)
     }
 
-    init(limit: Limit) {
+    init(limit: Limit, provider: Provider = .claude) {
+        self.provider = provider
+        kind = limit.kind
         let modelName = limit.scope?.model?.displayName
+        scopeName = modelName
         let isSession = (limit.group ?? limit.kind).hasPrefix("session")
 
-        seriesKey = limit.seriesKey
+        seriesKey = limit.seriesKey(for: provider)
         // How far back the trend reaches: one full window, so the trace covers the
         // quota's own cycle rather than an arbitrary slice of it.
         trendWindow = isSession ? 5 * 3_600 : 7 * 86_400
@@ -44,7 +54,9 @@ struct Gauge {
         case "session":
             longLabel = modelName.map { "Session · \($0)" } ?? "Session (5h)"
         case "weekly_all":
-            longLabel = "Weekly · all models"
+            // Codex has no per-model weekly split, so "all models" would imply a
+            // distinction that doesn't exist there.
+            longLabel = provider == .claude ? "Weekly · all models" : "Weekly"
         case "weekly_scoped":
             longLabel = modelName.map { "Weekly · \($0)" } ?? "Weekly · scoped"
         default:

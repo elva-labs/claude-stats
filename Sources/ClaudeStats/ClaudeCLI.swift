@@ -102,7 +102,7 @@ enum ClaudeCLI {
 
 /// One-shot latch so a continuation is resumed exactly once, whichever of the
 /// termination handler or the timeout gets there first.
-private final class Resumed: @unchecked Sendable {
+final class Resumed: @unchecked Sendable {
     private let lock = NSLock()
     private var used = false
 

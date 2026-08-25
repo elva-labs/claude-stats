@@ -63,12 +63,12 @@ enum History {
 
     // MARK: Writing
 
-    static func append(limits: [Limit]) {
+    static func append(limits: [Limit], provider: Provider = .claude) {
         let row = Row(
             t: Int(Date().timeIntervalSince1970),
             v: limits.map {
                 Row.Entry(
-                    k: $0.seriesKey,
+                    k: $0.seriesKey(for: provider),
                     p: Int($0.percent.rounded()),
                     r: $0.resetsAt.map { at in Int(at.timeIntervalSince1970) }
                 )
@@ -160,9 +160,17 @@ enum History {
 
 extension Limit {
     /// Stable identity for one quota across polls. The kind alone collides once a
-    /// plan has more than one per-model weekly limit, so the model qualifies it.
-    var seriesKey: String {
-        guard let model = scope?.model?.id ?? scope?.model?.displayName else { return kind }
-        return "\(kind):\(model)"
+    /// plan has more than one per-model weekly limit, so the model qualifies it —
+    /// and both providers have a session and a weekly quota, so any provider but
+    /// the original also prefixes its name. Claude stays unprefixed so history
+    /// recorded before Codex support continues the same series.
+    func seriesKey(for provider: Provider) -> String {
+        let base: String
+        if let model = scope?.model?.id ?? scope?.model?.displayName {
+            base = "\(kind):\(model)"
+        } else {
+            base = kind
+        }
+        return provider == .claude ? base : "\(provider.rawValue):\(base)"
     }
 }

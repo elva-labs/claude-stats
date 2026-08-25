@@ -12,6 +12,12 @@ enum Store {
         let limits: [Limit]
     }
 
+    /// One snapshot per provider, keyed by `Provider.rawValue`. Kept as a map so a
+    /// poll that only reached one endpoint doesn't discard the other's reading.
+    private struct State: Codable {
+        var providers: [String: Snapshot]
+    }
+
     static let url = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/ClaudeStats/state.json")
 
@@ -39,23 +45,31 @@ enum Store {
         return d
     }
 
-    static func save(limits: [Limit]) {
-        let snapshot = Snapshot(savedAt: Date(), limits: limits)
+    static func save(limits: [Limit], for provider: Provider) {
+        var state = loadState() ?? State(providers: [:])
+        state.providers[provider.rawValue] = Snapshot(savedAt: Date(), limits: limits)
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            try encoder.encode(snapshot).write(to: url, options: .atomic)
+            try encoder.encode(state).write(to: url, options: .atomic)
         } catch {
             Log.write("state save failed: \(error.localizedDescription)")
         }
     }
 
-    static func load() -> Snapshot? {
+    static func load(_ provider: Provider) -> Snapshot? {
+        loadState()?.providers[provider.rawValue]
+    }
+
+    private static func loadState() -> State? {
         guard let data = try? Data(contentsOf: url) else { return nil }
+        if let state = try? decoder.decode(State.self, from: data) { return state }
+        // Files written before Codex support hold a bare Claude snapshot.
         do {
-            return try decoder.decode(Snapshot.self, from: data)
+            let legacy = try decoder.decode(Snapshot.self, from: data)
+            return State(providers: [Provider.claude.rawValue: legacy])
         } catch {
             Log.write("state load failed: \(error.localizedDescription)")
             return nil
