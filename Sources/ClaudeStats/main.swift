@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastSignature: String?
     private var displayAsleep = false
     private var screenLocked = false
+    private let chart = ChartWindowController()
 
     /// Nobody can see the menu bar right now, so nothing needs fetching for it.
     private var isIdle: Bool { displayAsleep || screenLocked }
@@ -187,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 gauges = Self.sorted(result.usage.limits)
                 Store.save(limits: result.usage.limits)
+                History.append(limits: result.usage.limits)
 
                 let signature = Self.signature(of: gauges)
                 if signature == lastSignature {
@@ -240,6 +242,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func repaint() {
         render()
         if menuIsOpen, let menu = statusItem.menu { rebuild(menu) }
+        // The chart outlives the menu that opened it, so it has to be fed separately.
+        if chart.isVisible, let key = chart.shownKey,
+           let gauge = gauges.first(where: { $0.seriesKey == key }) {
+            chart.update(gauge: gauge, samples: trend(for: gauge))
+        }
     }
 
     // MARK: Pause
@@ -322,12 +329,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         for gauge in gauges {
-            let item = NSMenuItem(title: "", action: #selector(copyRow(_:)), keyEquivalent: "")
+            let title = Presentation.row(for: gauge, trend: trend(for: gauge))
+
+            let item = NSMenuItem(title: "", action: #selector(openChart(_:)), keyEquivalent: "")
             item.target = self
-            item.attributedTitle = Presentation.row(for: gauge)
-            item.representedObject = "\(gauge.longLabel): \(gauge.percent)%"
-                + (gauge.resetDescription().map { ", \($0)" } ?? "")
+            item.attributedTitle = title
+            item.representedObject = gauge.seriesKey
             menu.addItem(item)
+
+            // Same row, shown only while Option is held. An alternate has to follow
+            // its primary directly and share its (empty) key equivalent.
+            let copy = NSMenuItem(title: "", action: #selector(copyRow(_:)), keyEquivalent: "")
+            copy.target = self
+            copy.attributedTitle = title
+            copy.isAlternate = true
+            copy.keyEquivalentModifierMask = .option
+            copy.representedObject = "\(gauge.longLabel): \(gauge.percent)%"
+                + (gauge.resetDescription().map { ", \($0)" } ?? "")
+            menu.addItem(copy)
         }
 
         if let extra = extraUsage, extra.isEnabled == true {
@@ -356,7 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 ? " (\(Staleness.compactAge(since: lastUpdated)) ago)"
                 : ""
             menu.addItem(disabled(
-                "Updated \(f.string(from: lastUpdated))\(age)\(cadence)\(note) · click a row to copy",
+                "Updated \(f.string(from: lastUpdated))\(age)\(cadence)\(note) · click a row for its chart, ⌥click to copy",
                 color: .tertiaryLabelColor,
                 size: 11
             ))
@@ -399,6 +418,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Actions
 
     @objc private func refreshNow() { refresh(force: throttledUntil == nil) }
+
+    private func trend(for gauge: Gauge) -> [History.Sample] {
+        History.series(for: gauge.seriesKey, since: Date().addingTimeInterval(-gauge.trendWindow))
+    }
+
+    @objc private func openChart(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String,
+              let gauge = gauges.first(where: { $0.seriesKey == key }) else { return }
+        chart.show(gauge: gauge, samples: trend(for: gauge))
+    }
 
     @objc private func signIn() { ClaudeCLI.openInteractiveLogin() }
 
