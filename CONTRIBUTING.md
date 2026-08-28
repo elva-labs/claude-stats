@@ -44,7 +44,8 @@ swift test        # pure logic: gauges, parsing, staleness, bar rendering
   menu bar (`Tests/ClaudeStatsTests`). UI-only changes are fine without.
 - Update `README.md` for user-visible behaviour and `docs/DESIGN.md` for
   reasoning that a future contributor would otherwise have to re-derive.
-- One change per pull request. CI must pass.
+- One change per pull request. CI must pass. `main` only accepts pull requests
+  (no direct pushes, even for maintainers) and release tags are immutable.
 
 ## Releases
 
