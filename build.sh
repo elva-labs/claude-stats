@@ -20,12 +20,20 @@ BUILD_DIR="dist/${APP_NAME}.app"
 INSTALL_DIR="/Applications/${APP_NAME}.app"
 
 echo "==> Compiling"
-swift build -c release --disable-sandbox
+# Universal, so one download serves Apple Silicon and Intel Macs alike. Each
+# slice is built on its own and joined with lipo: `swift build --arch a --arch b`
+# would do it in one go, but needs Xcode's xcbuild, which the Command Line Tools
+# toolchain lacks — and contributors shouldn't need Xcode just to build.
+SLICES=()
+for ARCH in arm64 x86_64; do
+    swift build -c release --disable-sandbox --triple "${ARCH}-apple-macosx"
+    SLICES+=("$(swift build -c release --show-bin-path --triple "${ARCH}-apple-macosx")/ClaudeStats")
+done
 
 echo "==> Assembling bundle (v${VERSION})"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/Contents/MacOS" "$BUILD_DIR/Contents/Resources"
-cp "$(swift build -c release --show-bin-path)/ClaudeStats" "$BUILD_DIR/Contents/MacOS/ClaudeStats"
+lipo -create "${SLICES[@]}" -output "$BUILD_DIR/Contents/MacOS/ClaudeStats"
 
 cat > "$BUILD_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

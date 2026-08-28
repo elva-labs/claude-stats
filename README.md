@@ -34,9 +34,20 @@ login, your OpenAI quotas ride along.
 (`claude`) — the app reads its usage through the CLI's login. Codex (`codex login`)
 is optional and auto-detected.
 
+### Homebrew
+
+```sh
+brew tap elva-labs/elva
+brew install --cask claude-stats
+```
+
+### Direct download
+
 Download `Claude-Stats.zip` from the
 [latest release](https://github.com/elva-labs/claude-stats/releases/latest), unzip,
-and drag `Claude Stats.app` into `/Applications`. Releases are signed with Elva's
+and drag `Claude Stats.app` into `/Applications`.
+
+Either way you get a universal binary (Apple Silicon and Intel), signed with Elva's
 Developer ID and notarized by Apple, so it opens like any other app.
 
 Tick **Start at Login** in the dropdown if you want it always there.
@@ -56,8 +67,8 @@ cd claude-stats
 
 ### Uninstall
 
-Quit the app, delete `/Applications/Claude Stats.app`, and optionally remove its
-data: `~/Library/Application Support/ClaudeStats/` and `~/Library/Logs/ClaudeStats.log`.
+`brew uninstall --cask claude-stats` (add `--zap` to remove its data too), or quit the
+app, delete `/Applications/Claude Stats.app`, and optionally remove its data: `~/Library/Application Support/ClaudeStats/` and `~/Library/Logs/ClaudeStats.log`.
 It never modifies your Claude Code or Codex credentials, so there's nothing to undo there.
 
 ## How it works
