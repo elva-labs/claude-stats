@@ -37,8 +37,7 @@ is optional and auto-detected.
 Download `Claude-Stats.zip` from the
 [latest release](https://github.com/elva-labs/claude-stats/releases/latest), unzip,
 and drag `Claude Stats.app` into `/Applications`. Releases are signed with Elva's
-Developer ID; until they are also notarized, macOS asks once on first launch —
-approve it under **System Settings → Privacy & Security → Open Anyway**.
+Developer ID and notarized by Apple, so it opens like any other app.
 
 Tick **Start at Login** in the dropdown if you want it always there.
 
