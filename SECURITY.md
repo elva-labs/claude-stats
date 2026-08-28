@@ -16,9 +16,11 @@ no third-party services. Everything the app persists locally
 (`~/Library/Application Support/ClaudeStats/`, `~/Library/Logs/ClaudeStats.log`)
 contains percentages and timestamps, never tokens.
 
-Releases are signed with Elva's Developer ID certificate and, once
-notarization is in place, notarized by Apple. You can verify a download with
-`codesign -dv --verbose=2 "/Applications/Claude Stats.app"`.
+Releases are signed with Elva's Developer ID certificate and notarized by
+Apple, both done in CI. You can verify a download with
+`spctl -a -vv "/Applications/Claude Stats.app"`, which should report
+`source=Notarized Developer ID` and
+`origin=Developer ID Application: Elva Group AB (WL4K563SDJ)`.
 
 ## Reporting a vulnerability
 
