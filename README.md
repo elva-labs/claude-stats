@@ -38,6 +38,7 @@ is optional and auto-detected.
 
 ```sh
 brew tap elva-labs/elva
+brew trust elva-labs/elva   # newer Homebrew refuses third-party taps until trusted
 brew install --cask claude-stats
 ```
 
