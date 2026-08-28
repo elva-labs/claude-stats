@@ -297,6 +297,7 @@ percentages and the dropdown explains why.
 | `Sources/ClaudeStats/Store.swift` | Last-reading persistence and the staleness ladder |
 | `Sources/ClaudeStats/History.swift` | The append-only trail of past readings |
 | `Sources/ClaudeStats/Log.swift` | Append-only diagnostics log |
+| `Tests/ClaudeStatsTests/` | Unit tests for the pure logic: gauges, parsing, staleness, bar rendering |
 
 `Presentation` is deliberately free of app state, so the exact strings the app draws
 can be rendered to a PNG from a throwaway `main.swift` compiled against these sources

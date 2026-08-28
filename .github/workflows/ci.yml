@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Test
+        run: swift test
+
       - name: Build app bundle
         run: SKIP_INSTALL=1 ./build.sh
 

@@ -1,0 +1,42 @@
+name: Bug report
+description: Something is wrong or misleading in the menu bar
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Claude Stats version
+      description: From the Releases page you installed, or `git rev-parse --short HEAD` for a source build.
+      placeholder: v0.1.1
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "15.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: providers
+    attributes:
+      label: Providers involved
+      multiple: true
+      options:
+        - Claude
+        - OpenAI / Codex
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log lines
+      description: |
+        The app writes state transitions to `~/Library/Logs/ClaudeStats.log`. Paste the lines around the problem.
+        Tokens are never logged, but skim before posting anyway.
+      render: text

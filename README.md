@@ -1,5 +1,10 @@
 # Claude Stats
 
+[![CI](https://github.com/elva-labs/claude-stats/actions/workflows/ci.yml/badge.svg)](https://github.com/elva-labs/claude-stats/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/elva-labs/claude-stats?display_name=tag)](https://github.com/elva-labs/claude-stats/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-lightgrey)
+
 A macOS menu bar app that keeps your Claude usage percentages visible at all times —
 the same numbers `/usage` shows inside Claude Code. If the machine also has a Codex
 login, your OpenAI quotas ride along.
@@ -21,19 +26,25 @@ login, your OpenAI quotas ride along.
 - Read-only credentials: borrows the tokens Claude Code and the Codex CLI already
   maintain, never touches a refresh token, never prompts for keychain access
 - Survives offline: last reading is cached and fades with age instead of vanishing
+- No dependencies, no accounts, no telemetry — Foundation and AppKit only
 
 ## Installation
 
-Download the latest `Claude-Stats.zip` from the
-[Releases page](https://github.com/elva-labs/claude-stats/releases/latest), unzip,
-and drag `Claude Stats.app` into `/Applications`.
+**Requirements:** macOS 14 or later, and a signed-in [Claude Code](https://claude.com/claude-code)
+(`claude`) — the app reads its usage through the CLI's login. Codex (`codex login`)
+is optional and auto-detected.
 
-Sign in to Claude Code (`claude`) at least once — the app reads its usage numbers
-through the CLI's login. Codex (`codex login`) is optional and auto-detected.
+Download `Claude-Stats.zip` from the
+[latest release](https://github.com/elva-labs/claude-stats/releases/latest), unzip,
+and drag `Claude Stats.app` into `/Applications`. Releases are signed with Elva's
+Developer ID; until they are also notarized, macOS asks once on first launch —
+approve it under **System Settings → Privacy & Security → Open Anyway**.
+
+Tick **Start at Login** in the dropdown if you want it always there.
 
 ### Build from source
 
-Requires macOS 14+ and the Swift toolchain that ships with Xcode.
+Requires Xcode (or the Swift toolchain that ships with it).
 
 ```sh
 git clone https://github.com/elva-labs/claude-stats.git
@@ -44,6 +55,12 @@ cd claude-stats
 `build.sh` compiles, wraps the binary into `Claude Stats.app`, installs it to
 `/Applications`, and launches it. Re-running it replaces a running copy.
 
+### Uninstall
+
+Quit the app, delete `/Applications/Claude Stats.app`, and optionally remove its
+data: `~/Library/Application Support/ClaudeStats/` and `~/Library/Logs/ClaudeStats.log`.
+It never modifies your Claude Code or Codex credentials, so there's nothing to undo there.
+
 ## How it works
 
 Claude Code stores an OAuth token in the login keychain; the Codex CLI stores one in
@@ -53,9 +70,19 @@ token goes stale the app nudges the owning CLI to renew it and re-reads the resu
 it never redeems a refresh token itself, because refresh tokens rotate and a second
 owner would break your actual login.
 
+Tokens go only to their issuers' usage endpoints (`api.anthropic.com`, `chatgpt.com`)
+and nowhere else. What the app touches and how to report a problem is spelled out in
+[SECURITY.md](SECURITY.md).
+
 The full reasoning — colour scale, trend lines, polling cadence, throttle handling,
 file formats — lives in [docs/DESIGN.md](docs/DESIGN.md).
 
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
+the ground rules (the important one: never touch a refresh token) and how to run the
+tests.
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) © Elva Labs

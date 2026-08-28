@@ -164,6 +164,12 @@ enum CodexAPI {
             throw APIError.http(code, body)
         }
 
+        return try parse(data, renewedLogin: renewedLogin)
+    }
+
+    /// Turns a `wham/usage` body into limits and a footnote. Separate from the
+    /// request so the mapping can be exercised against captured responses.
+    static func parse(_ data: Data, renewedLogin: Bool = false) throws -> Result {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let wham: WhamUsage
