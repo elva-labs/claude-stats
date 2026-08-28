@@ -3,3 +3,8 @@ dist/
 .DS_Store
 *.xcuserstate
 .swiftpm/
+
+# Signing material — never commit. Lives here for convenience only; CI gets it via secrets.
+certs/
+*.p12
+*.p8
