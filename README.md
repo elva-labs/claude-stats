@@ -26,6 +26,8 @@ login, your OpenAI quotas ride along.
 - Read-only credentials: borrows the tokens Claude Code and the Codex CLI already
   maintain, never touches a refresh token, never prompts for keychain access
 - Survives offline: last reading is cached and fades with age instead of vanishing
+- `ClaudeStats usage --json` prints the same numbers for scripts and agents,
+  served from the app's cache so polling costs the endpoints nothing extra
 - No dependencies, no accounts, no telemetry — Foundation and AppKit only
 
 ## Installation
@@ -71,6 +73,51 @@ cd claude-stats
 `brew uninstall --cask claude-stats` (add `--zap` to remove its data too), or quit the
 app, delete `/Applications/Claude Stats.app`, and optionally remove its data: `~/Library/Application Support/ClaudeStats/` and `~/Library/Logs/ClaudeStats.log`.
 It never modifies your Claude Code or Codex credentials, so there's nothing to undo there.
+
+## Command line
+
+The app's binary doubles as a command. With no arguments it is the menu bar app;
+with `usage` it prints the quotas and exits, so a shell script, a status line or an
+agent can check how much is left before starting something expensive.
+
+```sh
+alias claude-stats="/Applications/Claude\ Stats.app/Contents/MacOS/ClaudeStats"
+# or, for something on PATH:
+ln -s "/Applications/Claude Stats.app/Contents/MacOS/ClaudeStats" ~/.local/bin/claude-stats
+
+claude-stats usage
+claude-stats usage --json
+claude-stats usage --json | jq '.providers.claude.limits[] | select(.kind == "session").percent'
+```
+
+```
+Claude  (cache, 2m ago)
+  Session (5h)          46%  resets in 3h 48m
+  Weekly · all models    2%  resets Tue 07:59
+  Weekly · Fable         2%  resets Tue 07:59
+OpenAI  (cache, 2m ago)
+  Session (5h)   16%  resets in 4h 34m
+  Weekly          3%  resets Tue 08:26
+```
+
+The reading comes from the same cache the app keeps. A reading younger than a
+minute (`--max-age`) is served as is; an older one triggers a fetch, which is
+recorded so the app and the next call benefit from it. That keeps a script polling
+in a tight loop from costing the endpoints any more than the app does — they
+throttle readily, and a throttle would hit the menu bar too. `--fresh` always
+fetches, `--cached` never does, and `--provider claude` (or `codex`, or `all`)
+narrows the output; by default you get Claude plus Codex when it is logged in.
+
+With `--json` every provider carries `source` (`live` or `cache`), `fetched_at`,
+`age_seconds`, `error`, and a `limits` array of `kind`, `label`, `percent`,
+`remaining_percent`, `severity`, `exhausted`, `resets_at` and `resets_in_seconds`.
+Keys are always present, `null` when unknown. When a fetch fails the last cached
+reading is returned with `error` set rather than nothing at all, so the exit status
+is 0 whenever every requested provider has a reading, 1 when one has none, and 2
+for a usage error. `--help` has the details.
+
+The command needs the app installed, not running: it reads the same credentials the
+app does and works without a menu bar session.
 
 ## How it works
 

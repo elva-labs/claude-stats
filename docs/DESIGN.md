@@ -268,6 +268,34 @@ figures but greys the whole readout behind a `⏸`, since a live colour grade wo
 data that is no longer current. The pause survives quits and reboots, expires on its
 own, and **Resume Polling** ends it early.
 
+## Command line
+
+`ClaudeStats usage` prints the numbers and exits. It lives in the same binary
+rather than a second one so there is one download, one signature, one cask — and
+one credential path, which matters given how carefully the token handling above is
+reasoned about. The app is what you get without arguments, because Finder, launchd
+and `open` never pass any.
+
+The command is **cache first**. A menu bar app polling every five minutes is well
+inside what the endpoints tolerate; a script in a loop is not, and a throttle earned
+by the script lands on the menu bar as well, since both use the same token. So a
+reading younger than `--max-age` (default 60 s, the app's own `minimumSpacing`) is
+served from `state.json` untouched, and only an older one goes to the network. A
+fetch the command does make is written back to `state.json` and `history.ndjson`
+like any poll, so the request is not wasted: the next call is served from it, and
+the app's trend lines gain a sample. (The running app keeps its history in memory
+and would not see the new line until relaunch; a retention sweep on its side can
+drop it. That costs one dot on a sparkline, which is not worth a lock file.)
+
+When a fetch fails, the last cached reading is returned with `error` set rather
+than nothing, for the same reason the menu bar fades stale numbers instead of
+blanking: a stale figure clearly marked as stale is more useful than an empty one.
+Hence the exit status is about whether there is a number at all — 0 when every
+requested provider has a reading, 1 when one has none — and the JSON carries
+`source`, `age_seconds` and `error` for callers that want to judge the number
+themselves. Every key is always present (`null`, never absent), so a script can read
+`.error` without first checking whether it exists.
+
 ## Diagnostics
 
 A menu bar app has nowhere to show a stack trace, so anything worth diagnosing is
