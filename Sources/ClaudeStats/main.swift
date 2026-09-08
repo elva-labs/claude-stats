@@ -638,6 +638,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 nonisolated(unsafe) private var retainedDelegate: AnyObject?
 
+// Arguments turn the binary into a one-shot command — `ClaudeStats usage --json` —
+// instead of the menu bar app. Finder, launchd and `open` pass none, so the app
+// is what you get by default. (`-psn_` is the process serial number older macOS
+// releases appended to Finder launches; it is not a request for the CLI.)
+let arguments = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") }
+if !arguments.isEmpty {
+    Task.detached {
+        exit(await CLI.main(Array(arguments)))
+    }
+    dispatchMain()
+}
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()

@@ -12,6 +12,12 @@ enum Log {
     private static let queue = DispatchQueue(label: "com.tobias.claudestats.log")
     private static let maxBytes = 256 * 1024
 
+    /// Waits for everything queued so far to reach the file. The app never needs
+    /// this; a one-shot command exits the moment it has printed.
+    static func flush() {
+        queue.sync {}
+    }
+
     static func write(_ message: String) {
         queue.async {
             let stamp = ISO8601DateFormatter().string(from: Date())

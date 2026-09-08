@@ -18,8 +18,8 @@ struct Gauge {
     /// Stable across polls, so the menu-bar selection survives percentages and
     /// reset times changing under it.
     var id: String { "\(provider.rawValue):\(kind):\(scopeName ?? "")" }
-    private let kind: String
-    private let scopeName: String?
+    let kind: String
+    let scopeName: String?
 
     enum Severity {
         case normal, warning, critical
@@ -107,7 +107,10 @@ struct Gauge {
 
     /// "resets in 1h 12m", or an absolute time once it is more than a day out.
     func resetDescription(now: Date = Date()) -> String? {
-        guard let resetsAt else { return nil }
+        resetsAt.map { Self.resetDescription(resetsAt: $0, now: now) }
+    }
+
+    static func resetDescription(resetsAt: Date, now: Date = Date()) -> String {
         let seconds = resetsAt.timeIntervalSince(now)
         guard seconds > 0 else { return "resetting…" }
 
