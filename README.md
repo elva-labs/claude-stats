@@ -123,10 +123,10 @@ app does and works without a menu bar session.
 
 Claude Code stores an OAuth token in the login keychain; the Codex CLI stores one in
 `~/.codex/auth.json`. Claude Stats reads those tokens — read-only, re-read on every
-poll — and calls the same usage endpoints the CLIs' own status commands use. When a
-token goes stale the app nudges the owning CLI to renew it and re-reads the result;
-it never redeems a refresh token itself, because refresh tokens rotate and a second
-owner would break your actual login.
+poll — and calls the same usage endpoints the CLIs' own status commands use. When
+Claude Code's token goes stale the app keeps the last reading up, dimmed, until Claude
+Code next runs and writes a fresh one; it never redeems a refresh token itself, because
+refresh tokens rotate and a second owner would break your actual login.
 
 Tokens go only to their issuers' usage endpoints (`api.anthropic.com`, `chatgpt.com`)
 and nowhere else. What the app touches and how to report a problem is spelled out in

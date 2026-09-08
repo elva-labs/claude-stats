@@ -222,10 +222,10 @@ enum CLI {
             let live: Reading
             switch provider {
             case .claude:
-                let result = try await UsageAPI.fetch()
+                let usage = try await UsageAPI.fetch()
                 live = Reading(
-                    source: .live, at: Date(), limits: result.usage.limits,
-                    extraUsage: result.usage.extraUsage, footnote: nil
+                    source: .live, at: Date(), limits: usage.limits,
+                    extraUsage: usage.extraUsage, footnote: nil
                 )
             case .codex:
                 let result = try await CodexAPI.fetch()

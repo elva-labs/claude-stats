@@ -11,7 +11,9 @@ import Foundation
 ///
 /// We deliberately only *read* it. Claude Code owns the refresh cycle and writes
 /// the fresh token back to the same item, so re-reading on every poll is enough
-/// to stay current without us ever touching the refresh token.
+/// to stay current without us ever touching the refresh token. The refresh token's
+/// own expiry is read alongside, because it separates "Claude Code will renew this
+/// next time it runs" from "only a human signing in again can fix this".
 enum Keychain {
     static let service = "Claude Code-credentials"
 
@@ -33,16 +35,23 @@ enum Keychain {
         }
     }
 
-    private struct Credentials: Decodable {
+    struct Credentials: Equatable {
+        let accessToken: String
+        /// When the refresh token stops working, i.e. when Claude Code itself can no
+        /// longer renew without a person signing in. Absent in older blobs.
+        let refreshExpiresAt: Date?
+    }
+
+    private struct Blob: Decodable {
         struct OAuth: Decodable {
             let accessToken: String
-            let expiresAt: Double?
+            let refreshTokenExpiresAt: Double?
         }
         let claudeAiOauth: OAuth
     }
 
-    /// The current access token, plus its expiry (if the stored blob has one).
-    static func accessToken() throws -> (token: String, expiresAt: Date?) {
+    /// What Claude Code currently has stored.
+    static func credentials() throws -> Credentials {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         process.arguments = ["find-generic-password", "-s", service, "-w"]
@@ -73,20 +82,27 @@ enum Keychain {
             throw TokenError.lookupFailed(process.terminationStatus, detail)
         }
 
-        guard let payload = String(data: outData, encoding: .utf8)?
+        return try parse(outData)
+    }
+
+    /// The stored blob is JSON with millisecond epoch timestamps. Split out so the
+    /// shape can be tested without a keychain.
+    static func parse(_ data: Data) throws -> Credentials {
+        guard let payload = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .data(using: .utf8)
         else { throw TokenError.malformed }
 
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        guard let creds = try? decoder.decode(Credentials.self, from: payload) else {
+        guard let blob = try? decoder.decode(Blob.self, from: payload) else {
             throw TokenError.malformed
         }
 
-        let expiry = creds.claudeAiOauth.expiresAt.map {
-            Date(timeIntervalSince1970: $0 / 1000)
-        }
-        return (creds.claudeAiOauth.accessToken, expiry)
+        let oauth = blob.claudeAiOauth
+        return Credentials(
+            accessToken: oauth.accessToken,
+            refreshExpiresAt: oauth.refreshTokenExpiresAt.map { Date(timeIntervalSince1970: $0 / 1000) }
+        )
     }
 }

@@ -1,16 +1,15 @@
 import AppKit
 import Foundation
 
-/// Nudges the Claude Code CLI into renewing its own OAuth token.
+/// Locates the Claude Code CLI and opens an interactive sign-in with it.
 ///
 /// The app deliberately never refreshes the token itself. The refresh response
 /// carries a new `refresh_token`, so refresh tokens rotate — a second client doing
 /// its own refresh would invalidate the one Claude Code holds and break your real
-/// login. Instead we ask the CLI to do it and re-read the result, leaving Claude Code
-/// the sole owner of the credential.
-///
-/// `auth status` is used rather than a prompt because it touches no inference and so
-/// costs none of the quota this app exists to report on.
+/// login. Nor can the CLI be asked to renew on the app's behalf: `claude auth status`
+/// only reports what is stored, and anything that does renew is a real prompt, which
+/// costs the quota this app exists to report on. So an expired access token is simply
+/// waited out until Claude Code's next run writes a fresh one (see `UsageAPI.fetch`).
 enum ClaudeCLI {
     /// Where the CLI might live. A GUI app launched by Finder or launchd inherits a
     /// bare PATH, so the binary has to be found by absolute path.
@@ -26,59 +25,6 @@ enum ClaudeCLI {
             return URL(fileURLWithPath: path)
         }
         return nil
-    }
-
-    /// Ask the CLI to validate its session, which renews the token when it is stale.
-    /// Returns whether the command completed cleanly; the caller decides whether the
-    /// keychain actually moved.
-    static func refreshAuth(timeout: TimeInterval = 20) async -> Bool {
-        guard let executable else { return false }
-
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["auth", "status", "--json"]
-        // Discarded, not piped: nothing reads them, and an unread pipe deadlocks
-        // the child once its ~64KB buffer fills.
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        // Keep it non-interactive: no TTY, so it can never sit waiting for input.
-        process.standardInput = FileHandle.nullDevice
-
-        // Launched at login we inherit almost no environment, so hand the CLI the
-        // variables it needs. `USER` matters more than it looks: without it the CLI
-        // reports `loggedIn: false` and silently renews nothing, so the app would
-        // appear to be self-healing while doing exactly nothing.
-        var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = NSHomeDirectory()
-        environment["USER"] = NSUserName()
-        environment["LOGNAME"] = NSUserName()
-        environment["PATH"] = [
-            executable.deletingLastPathComponent().path,
-            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-        ].joined(separator: ":")
-        process.environment = environment
-
-        return await withCheckedContinuation { continuation in
-            let resumed = Resumed()
-
-            process.terminationHandler = { proc in
-                guard resumed.claim() else { return }
-                continuation.resume(returning: proc.terminationStatus == 0)
-            }
-
-            do {
-                try process.run()
-            } catch {
-                if resumed.claim() { continuation.resume(returning: false) }
-                return
-            }
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                guard process.isRunning else { return }
-                process.terminate()
-                if resumed.claim() { continuation.resume(returning: false) }
-            }
-        }
     }
 
     /// Opens an interactive sign-in in Terminal, for when the refresh token itself
@@ -101,19 +47,3 @@ enum ClaudeCLI {
         NSWorkspace.shared.open(script)
     }
 }
-
-/// One-shot latch so a continuation is resumed exactly once, whichever of the
-/// termination handler or the timeout gets there first.
-final class Resumed: @unchecked Sendable {
-    private let lock = NSLock()
-    private var used = false
-
-    func claim() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if used { return false }
-        used = true
-        return true
-    }
-}
-

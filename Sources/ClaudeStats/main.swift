@@ -38,6 +38,10 @@ struct ProviderState {
     var needsInteractiveLogin = false
     var throttledUntil: Date?
     var backoffStep = 0
+    /// The access token the endpoint last rejected. While set, polls only re-read
+    /// the keychain and go to the network once a different token has appeared —
+    /// which happens when Claude Code next runs. Claude only; Codex renews itself.
+    var staleToken: String?
 }
 
 @MainActor
@@ -154,10 +158,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // A quota coming back is worth knowing about promptly, whatever the
         // cadence — but only for a provider that can actually be asked. A gauge
-        // whose provider is throttled keeps its stale reset time for the whole
-        // backoff, and letting it trip this fast path would hammer the *other*
-        // provider once a minute for nothing.
-        let askable = providers.filter { (state($0).throttledUntil ?? .distantPast) <= now }
+        // whose provider is throttled, or waiting for its CLI to renew a dead
+        // token, keeps its stale reset time the whole time, and letting it trip
+        // this fast path would hammer the *other* provider once a minute for nothing.
+        let askable = providers.filter {
+            (state($0).throttledUntil ?? .distantPast) <= now && state($0).staleToken == nil
+        }
         if askable.contains(where: { provider in
             state(provider).gauges.contains { $0.resetsAt.map { $0 <= now } ?? false }
         }) {
@@ -215,6 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         lastAttempt = now
         isFetching = true
+        let staleClaudeToken = state(.claude).staleToken
 
         Task {
             defer { isFetching = false }
@@ -225,12 +232,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         do {
                             switch provider {
                             case .claude:
-                                let result = try await UsageAPI.fetch()
+                                let usage = try await UsageAPI.fetch(staleToken: staleClaudeToken)
                                 return (provider, .success(Fetched(
-                                    limits: result.usage.limits,
-                                    extraUsage: result.usage.extraUsage,
+                                    limits: usage.limits,
+                                    extraUsage: usage.extraUsage,
                                     footnote: nil,
-                                    renewedLogin: result.renewedLogin
+                                    renewedLogin: false
                                 )))
                             case .codex:
                                 let result = try await CodexAPI.fetch()
@@ -279,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .success(let fetched):
             // Log transitions only — a line per successful poll would bury the
             // few events that actually explain a problem.
-            if s.lastError != nil || s.throttledUntil != nil || s.lastUpdated == nil {
+            if s.lastError != nil || s.throttledUntil != nil || s.staleToken != nil || s.lastUpdated == nil {
                 Log.write("\(provider.rawValue) ok — \(fetched.limits.count) limits")
             }
             s.gauges = Self.sorted(fetched.limits, provider: provider)
@@ -292,6 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             s.needsInteractiveLogin = false
             s.throttledUntil = nil
             s.backoffStep = 0
+            s.staleToken = nil
             s.lastUpdated = Date()
             states[provider] = s
             return true
@@ -309,6 +317,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 s.throttledUntil = Date().addingTimeInterval(delay)
                 s.lastError = nil
                 Log.write("\(provider.rawValue) throttled for \(Int(delay))s (step \(s.backoffStep))")
+            case .loginStale(let token):
+                // Not an error, any more than a throttle is: the access token has
+                // run out its ~8 hours and Claude Code will write a new one the
+                // next time it runs. The last reading stays up, fading with age,
+                // and polls only re-read the keychain until the token changes.
+                s.lastError = nil
+                s.needsInteractiveLogin = false
+                s.staleToken = token
             case .auth:
                 s.lastError = error.localizedDescription
                 // Only an auth failure is something a human can fix by signing in;
@@ -325,6 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private enum FailureKind {
         case rateLimited(retryAfter: TimeInterval?)
+        case loginStale(token: String)
         case auth
         case other
     }
@@ -334,6 +351,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case UsageAPI.APIError.rateLimited(let retryAfter),
              CodexAPI.APIError.rateLimited(let retryAfter):
             return .rateLimited(retryAfter: retryAfter)
+        case UsageAPI.APIError.loginStale(let token):
+            return .loginStale(token: token)
         case UsageAPI.APIError.unauthorized, CodexAPI.APIError.unauthorized,
              CodexAPI.APIError.notLoggedIn, Keychain.TokenError.notFound:
             // "Not logged in" belongs with "login expired": both are fixed by the
@@ -454,6 +473,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 f.dateFormat = "HH:mm:ss"
                 menu.addItem(disabled(
                     "Rate limited by the usage API · retrying \(f.string(from: until))",
+                    color: .secondaryLabelColor
+                ))
+            }
+
+            if s.staleToken != nil {
+                menu.addItem(disabled(
+                    "Waiting for Claude Code to renew its login · your next claude session renews it",
                     color: .secondaryLabelColor
                 ))
             }

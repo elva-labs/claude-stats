@@ -142,3 +142,18 @@ private final class LineBuffer: @unchecked Sendable {
         return lines
     }
 }
+
+/// One-shot latch so a continuation is resumed exactly once, whichever of the
+/// termination handler or the timeout gets there first.
+final class Resumed: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if used { return false }
+        used = true
+        return true
+    }
+}
