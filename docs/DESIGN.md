@@ -171,22 +171,30 @@ macOS never asks. Reading via the Security framework instead would prompt on eve
 rebuild (the code signature changes the app's identity) and again whenever Claude
 Code recreates the item on a token refresh.
 
-### Keeping it alive without running Claude Code
+### When Claude Code hasn't run for a while
 
-Access tokens last roughly eight hours and are only renewed while Claude Code is
-running, so an app left up overnight would otherwise wake to a dead token. Instead of
-refreshing the token itself, the app asks the CLI to do it:
+Access tokens last eight hours and are only renewed while Claude Code is running, so
+an app left up overnight wakes to a token the endpoint rejects. The app cannot renew
+it: refreshing itself would break the real login (above), and there is no CLI command
+that renews without inference — `claude auth status` only prints what is stored, and
+a throwaway prompt would spend the quota this app reports on.
 
-- When the stored expiry is **within 10 minutes**, or a request comes back **401**, it
-  runs `claude auth status --json` in the background.
-- That command touches no inference, so it costs **none of the quota this app
-  reports on** — which rules out the obvious alternative of firing a throwaway prompt.
-  It returns in about 0.2s.
-- It then re-reads the keychain and only reports a renewal if the token **actually
-  changed**, rather than trusting the exit code.
+So a rejected token is treated like a throttle, not like a failure:
 
-If the refresh token itself has expired, no automation can help — the menu then offers
-**Sign In to Claude Code…**, which opens Terminal running `claude auth login`.
+- The last reading stays on screen and fades with age, exactly as it does when the
+  endpoint is throttling or the network is down. No warning glyph.
+- The dropdown says it is waiting for Claude Code to renew the login.
+- The app remembers the rejected token and, until the keychain holds a different one,
+  each poll is just a keychain read. Retrying the endpoint with a dead token only
+  earns a `429` with an hour-long `Retry-After`, which used to lock out even the
+  manual refresh long after Claude Code had written a fresh token.
+- The moment Claude Code runs and writes a new token, the next poll (or opening the
+  menu) picks it up and the numbers come back.
+
+Only when the **refresh token** itself has expired — the keychain blob carries that
+expiry too — is there something a person has to do. Then, and only then, the menu
+shows the warning glyph and offers **Sign In to Claude Code…**, which opens Terminal
+running `claude auth login`.
 
 The CLIs are located by absolute path (`~/.local/bin`, Homebrew, `/usr/local/bin`,
 the Codex desktop app bundle), because an app launched by Finder or launchd inherits
@@ -300,11 +308,11 @@ themselves. Every key is always present (`null`, never absent), so a script can 
 
 A menu bar app has nowhere to show a stack trace, so anything worth diagnosing is
 appended to `~/Library/Logs/ClaudeStats.log`. It records state *transitions* — the
-first success after a failure, HTTP errors, throttles, renewals — rather than a line
+first success after a failure, HTTP errors, throttles, rejected tokens — rather than a line
 per poll, so the events that explain a problem aren't buried. It truncates at 256 KB.
 
-If a token is ever rejected, the menu bar shows `⚠︎` next to the last known
-percentages and the dropdown explains why.
+If the login has expired beyond what Claude Code can renew, the menu bar shows `⚠︎`
+next to the last known percentages and the dropdown explains why.
 
 ## Layout
 
@@ -320,8 +328,8 @@ percentages and the dropdown explains why.
 | `Sources/ClaudeStats/Sparkline.swift` | The per-row trend line |
 | `Sources/ClaudeStats/Chart.swift` | The full-size chart view and its window |
 | `Sources/ClaudeStats/Presentation.swift` | Menu bar title and dropdown row typography |
-| `Sources/ClaudeStats/Keychain.swift` | Read-only access-token lookup |
-| `Sources/ClaudeStats/ClaudeCLI.swift` | Nudges the Claude CLI to renew its own login |
+| `Sources/ClaudeStats/Keychain.swift` | Read-only credential lookup, with both expiries |
+| `Sources/ClaudeStats/ClaudeCLI.swift` | Locates the Claude CLI and opens an interactive sign-in |
 | `Sources/ClaudeStats/Store.swift` | Last-reading persistence and the staleness ladder |
 | `Sources/ClaudeStats/History.swift` | The append-only trail of past readings |
 | `Sources/ClaudeStats/Log.swift` | Append-only diagnostics log |

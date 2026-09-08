@@ -8,7 +8,7 @@ things are the way they are and will save you a round-trip in review.
 ## Ground rules
 
 - **Never touch a refresh token.** The app reads access tokens that Claude
-  Code and the Codex CLI already maintain, and asks those CLIs to renew them.
+  Code and the Codex CLI already maintain, and waits for those CLIs to renew them.
   A change that redeems a refresh token itself will not be merged, however
   convenient — it breaks the user's real login (see the design notes).
 - **Polling is a budget, not a free resource.** Anything that adds requests

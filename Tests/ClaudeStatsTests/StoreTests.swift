@@ -49,3 +49,26 @@ final class StalenessTests: XCTestCase {
         XCTAssertEqual(Staleness.compactAge(since: now.addingTimeInterval(-2 * 86_400), now: now), "2d")
     }
 }
+
+final class KeychainTests: XCTestCase {
+    func testParsesTheRefreshExpiry() throws {
+        let blob = """
+        {"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc","refreshToken":"sk-ant-ort01-xyz",
+         "expiresAt":1788882282542,"refreshTokenExpiresAt":1791474282542,"scopes":["user:inference"]}}
+        """
+        let creds = try Keychain.parse(Data(blob.utf8))
+        XCTAssertEqual(creds.accessToken, "sk-ant-oat01-abc")
+        let refreshExpiry = try XCTUnwrap(creds.refreshExpiresAt)
+        XCTAssertEqual(refreshExpiry.timeIntervalSince1970, 1_791_474_282.542, accuracy: 0.001)
+    }
+
+    func testOlderBlobsWithoutTheExpiryStillParse() throws {
+        let creds = try Keychain.parse(Data("{\"claudeAiOauth\":{\"accessToken\":\"tok\"}}\n".utf8))
+        XCTAssertEqual(creds.accessToken, "tok")
+        XCTAssertNil(creds.refreshExpiresAt)
+    }
+
+    func testMalformedBlobIsRejected() {
+        XCTAssertThrowsError(try Keychain.parse(Data("not json".utf8)))
+    }
+}

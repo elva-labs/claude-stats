@@ -41,13 +41,19 @@ enum UsageAPI {
 
     enum APIError: LocalizedError {
         case unauthorized
+        /// The endpoint rejected the stored access token but the refresh token is
+        /// still good, so Claude Code will renew it the next time it runs. Carries
+        /// the rejected token so the caller can tell when the keychain has moved.
+        case loginStale(token: String)
         case rateLimited(retryAfter: TimeInterval?)
         case http(Int, String)
 
         var errorDescription: String? {
             switch self {
             case .unauthorized:
-                return "Claude Code's login has expired and couldn't be renewed automatically."
+                return "Claude Code's login has expired. Sign in again to continue."
+            case .loginStale:
+                return "Waiting for Claude Code to renew its login."
             case .rateLimited:
                 return "Rate limited by the usage API — backing off."
             case .http(let code, let body):
@@ -57,55 +63,36 @@ enum UsageAPI {
         }
     }
 
-    /// What a poll produced, plus whether the CLI had to be nudged to get there —
-    /// the menu surfaces that so a silently self-healing login is still visible.
-    struct Result {
-        let usage: UsageResponse
-        let renewedLogin: Bool
-    }
-
-    /// How close to expiry we start renewing rather than waiting for a 401.
-    private static let renewWindow: TimeInterval = 10 * 60
-
-    static func fetch() async throws -> Result {
-        var credentials: (token: String, expiresAt: Date?)
+    /// Fetches the current usage with whatever token Claude Code has stored.
+    ///
+    /// Access tokens last about eight hours and only Claude Code can renew them
+    /// (see `ClaudeCLI`). Once the endpoint has rejected a token, asking again with
+    /// the same one is pointless and gets the app throttled, so the caller passes
+    /// the rejected token back in as `staleToken` and this only goes to the network
+    /// once the keychain holds a different one.
+    static func fetch(staleToken: String? = nil) async throws -> UsageResponse {
+        let credentials: Keychain.Credentials
         do {
-            credentials = try Keychain.accessToken()
+            credentials = try Keychain.credentials()
         } catch {
             Log.write("keychain read failed: \(error.localizedDescription)")
             throw error
         }
-        var renewed = false
 
-        // Pre-empt the expiry when we can see it coming: cheaper than a failed
-        // round trip, and it keeps the numbers from flickering into a warning.
-        if let expiry = credentials.expiresAt, expiry.timeIntervalSinceNow < renewWindow {
-            renewed = await renewLogin()
-            if renewed { credentials = (try? Keychain.accessToken()) ?? credentials }
+        if let staleToken, credentials.accessToken == staleToken {
+            throw APIError.loginStale(token: staleToken)
         }
 
         do {
-            let usage = try await request(token: credentials.token)
-            if renewed { Log.write("renewed login, \(usage.limits.count) limits") }
-            return Result(usage: usage, renewedLogin: renewed)
+            return try await request(token: credentials.accessToken)
         } catch APIError.unauthorized {
-            // Either the expiry was wrong or the token was revoked — one retry.
-            Log.write("401 — asking the CLI to renew")
-            guard await renewLogin(), let fresh = try? Keychain.accessToken() else {
-                Log.write("renewal did not produce a new token")
+            if let refreshExpiry = credentials.refreshExpiresAt, refreshExpiry <= Date() {
+                Log.write("401 and the refresh token expired \(ISO8601DateFormatter().string(from: refreshExpiry)) — sign-in needed")
                 throw APIError.unauthorized
             }
-            return Result(usage: try await request(token: fresh.token), renewedLogin: true)
+            Log.write("401 — waiting for Claude Code to renew its login")
+            throw APIError.loginStale(token: credentials.accessToken)
         }
-    }
-
-    /// Ask the CLI to renew, and report whether the stored token actually moved
-    /// rather than trusting the command's exit code alone.
-    private static func renewLogin() async -> Bool {
-        let before = try? Keychain.accessToken()
-        guard await ClaudeCLI.refreshAuth() else { return false }
-        let after = try? Keychain.accessToken()
-        return after?.token != before?.token
     }
 
     private static func request(token: String) async throws -> UsageResponse {
