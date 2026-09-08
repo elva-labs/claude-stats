@@ -58,7 +58,8 @@ final class KeychainTests: XCTestCase {
         """
         let creds = try Keychain.parse(Data(blob.utf8))
         XCTAssertEqual(creds.accessToken, "sk-ant-oat01-abc")
-        XCTAssertEqual(creds.refreshExpiresAt?.timeIntervalSince1970, 1_791_474_282.542, accuracy: 0.001)
+        let refreshExpiry = try XCTUnwrap(creds.refreshExpiresAt)
+        XCTAssertEqual(refreshExpiry.timeIntervalSince1970, 1_791_474_282.542, accuracy: 0.001)
     }
 
     func testOlderBlobsWithoutTheExpiryStillParse() throws {
